@@ -1,0 +1,374 @@
+# The house CI/CD pipeline for BeeSec's app-shaped repos: a Python 3.11
+# Azure Functions API under api/ plus a Vite/React SPA under web/, deployed
+# to a Function App and a Static Web App. honeycomb, nectar, propolis,
+# diapause, beeline, hive and the rest of the fleet are all this shape by
+# design (orchestrator/standards/stack.md), so the pipeline lives here ONCE
+# and each repo calls it with its own names. Fix it here and every app is
+# corrected on its next run.
+#
+# Cost rules baked in, in order of what they save:
+#   - ONE consolidated test job. GitHub bills each job rounded UP to a full
+#     minute plus VM spin-up, so five 40-second jobs cost five minutes where
+#     one two-minute job costs two. Repo-specific checks ride the same job
+#     via `extra_gate_script` rather than becoming jobs of their own.
+#   - pip and npm caches, so the gate does not rebuild its toolbox each run.
+#   - Deploys run on push to main (and manual dispatch) only — never on PRs.
+#     PR preview environments are deliberately not supported: they doubled
+#     the frontend build bill and the stale previews were not being used.
+#   - Callers add a concurrency group cancelling superseded PR runs (see the
+#     caller stub below).
+#
+# What a caller looks like (this is the ENTIRE per-repo workflow):
+#
+#   name: Deploy <app>
+#   on:
+#     push: { branches: [main] }
+#     pull_request: { branches: [main] }
+#     workflow_dispatch:
+#   permissions:
+#     contents: read
+#     id-token: write      # only needed for api_deploy_mode: run-from-package
+#   concurrency:
+#     group: ${{ github.workflow }}-${{ github.ref }}
+#     cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+#   jobs:
+#     pipeline:
+#       uses: BeeSec-UK/.github/.github/workflows/beesec-app.yml@main
+#       secrets: inherit
+#       with:
+#         function_app: func-<app>-prod
+#         ...
+#
+# Secrets are taken from the calling repo via `secrets: inherit`, under the
+# names the fleet already uses: AZURE_STATIC_WEB_APPS_API_TOKEN for the SWA
+# deploy and, in publish-profile mode only, AZURE_FUNCTIONAPP_PUBLISH_PROFILE.
+# run-from-package mode needs no stored secret at all — it authenticates by
+# OIDC as a managed identity federated to the caller repo's main branch.
+
+name: BeeSec app pipeline
+
+on:
+  workflow_call:
+    inputs:
+      # ---- test gate -------------------------------------------------------
+      python_version:
+        type: string
+        default: '3.11'
+      node_version:
+        type: string
+        default: '20'
+      apt_packages:
+        description: System packages the backend tests need (e.g. the WeasyPrint native stack). Space-separated.
+        type: string
+        default: ''
+      requirements_path:
+        description: Requirements file for tests AND the deployed package vendor step.
+        type: string
+        default: 'api/requirements.txt'
+      extra_pip:
+        description: Test-only pip packages, kept out of the requirements file so they never ship.
+        type: string
+        default: 'pytest'
+      pytest_workdir:
+        type: string
+        default: 'api'
+      pytest_args:
+        type: string
+        default: '-q'
+      has_web:
+        description: Set false for an API-only app (e.g. apitoxin) — all web steps are skipped.
+        type: boolean
+        default: true
+      npm_install_command:
+        type: string
+        default: 'npm ci'
+      typecheck_command:
+        description: Must check the real projects. For project-references builds this is `npx tsc -b` — bare `--noEmit` checks nothing under them.
+        type: string
+        default: 'npx tsc -b'
+      run_vitest:
+        type: boolean
+        default: true
+      vitest_command:
+        type: string
+        default: 'npx vitest run'
+      extra_gate_script:
+        description: Repo-specific checks (hygiene greps, codegen drift, infra tests). Runs from the repo root, in the SAME job, after the standard gate — Python and node_modules are already set up.
+        type: string
+        default: ''
+      # ---- frontend deploy -------------------------------------------------
+      deploy_swa:
+        type: boolean
+        default: true
+      app_location:
+        type: string
+        default: 'web'
+      output_location:
+        type: string
+        default: 'dist'
+      app_build_command:
+        type: string
+        default: 'npm install && npm run build'
+      frontend_build_env:
+        description: |
+          Vite build-time env as KEY=VALUE lines (VITE_PLATFORM_* etc.). SWA app
+          settings reach the Functions runtime, NOT the Oryx build, so these MUST
+          be set on the build job — see standards/msal-pivot-playbook.md §2.
+          Values are non-secret: they ship in the public bundle anyway.
+        type: string
+        default: ''
+      # ---- API deploy -------------------------------------------------------
+      deploy_api:
+        type: boolean
+        default: true
+      api_deploy_mode:
+        description: >-
+          'run-from-package' (preferred: OIDC managed identity, zip in the
+          releases container, no stored secret) or 'publish-profile'
+          (Azure/functions-action with the AZURE_FUNCTIONAPP_PUBLISH_PROFILE
+          secret, for apps whose managed identity is not federated yet).
+        type: string
+        default: 'run-from-package'
+      function_app:
+        type: string
+        default: ''
+      resource_group:
+        type: string
+        default: ''
+      storage_account:
+        type: string
+        default: ''
+      releases_container:
+        type: string
+        default: 'function-releases'
+      azure_client_id:
+        description: Managed identity client id (public identifier, not a secret). run-from-package mode only.
+        type: string
+        default: ''
+      azure_tenant_id:
+        type: string
+        default: ''
+      azure_subscription_id:
+        type: string
+        default: ''
+      post_deploy_script:
+        description: Extra publishing the deploy carries (e.g. honeycomb's house-template sync). Runs after the package flip, with the az OIDC session still live — run-from-package mode only.
+        type: string
+        default: ''
+      smoke_path:
+        type: string
+        default: '/api/healthz'
+      smoke_expect_sha:
+        description: Require the deployed commit sha in the smoke response, proving the NEW build answers rather than a still-warm previous worker. Needs healthz to echo APP_VERSION.
+        type: boolean
+        default: false
+
+jobs:
+  gate:
+    name: Tests (pytest + web gate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Install system packages
+        if: inputs.apt_packages != ''
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends ${{ inputs.apt_packages }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python_version }}
+          cache: pip
+          cache-dependency-path: ${{ inputs.requirements_path }}
+
+      - name: Install API dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r ${{ inputs.requirements_path }} ${{ inputs.extra_pip }}
+
+      - name: Backend tests (pytest)
+        working-directory: ${{ inputs.pytest_workdir }}
+        env:
+          APP_ENV: local
+        run: python -m pytest ${{ inputs.pytest_args }}
+
+      - name: Set up Node
+        if: inputs.has_web
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install web dependencies
+        if: inputs.has_web
+        working-directory: web
+        run: ${{ inputs.npm_install_command }}
+
+      - name: Typecheck
+        if: inputs.has_web
+        working-directory: web
+        run: ${{ inputs.typecheck_command }}
+
+      - name: Frontend tests (vitest)
+        if: inputs.has_web && inputs.run_vitest
+        working-directory: web
+        run: ${{ inputs.vitest_command }}
+
+      - name: Repo-specific gates
+        if: inputs.extra_gate_script != ''
+        run: ${{ inputs.extra_gate_script }}
+
+  deploy_frontend:
+    name: Frontend (SWA)
+    needs: gate
+    if: inputs.deploy_swa && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Export build-time env
+        if: inputs.frontend_build_env != ''
+        run: |
+          while IFS= read -r line; do
+            case "$line" in
+              *=*) echo "$line" >> "$GITHUB_ENV" ;;
+            esac
+          done <<'BEESEC_BUILD_ENV'
+          ${{ inputs.frontend_build_env }}
+          BEESEC_BUILD_ENV
+
+      - name: Deploy SWA
+        uses: Azure/static-web-apps-deploy@v1
+        with:
+          azure_static_web_apps_api_token: ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN }}
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          action: upload
+          app_location: ${{ inputs.app_location }}
+          api_location: ""
+          output_location: ${{ inputs.output_location }}
+          app_build_command: ${{ inputs.app_build_command }}
+
+  deploy_api:
+    name: API (Function App)
+    needs: gate
+    if: inputs.deploy_api && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python_version }}
+          cache: pip
+          cache-dependency-path: ${{ inputs.requirements_path }}
+
+      - name: Vendor dependencies into the package
+        run: |
+          python -m pip install --upgrade pip
+          pip install \
+            --platform manylinux2014_x86_64 \
+            --implementation cp \
+            --python-version ${{ inputs.python_version }} \
+            --only-binary=:all: \
+            --upgrade \
+            -r ${{ inputs.requirements_path }} \
+            --target="api/.python_packages/lib/site-packages"
+
+      - name: Stamp the build with the commit it came from
+        # functions-action and run-from-package can both report success while
+        # Linux Consumption serves the previous package for a while longer.
+        # The stamp (and APP_VERSION in run-from-package mode) is what lets
+        # the smoke step tell a fix that does not work from a fix that is
+        # not running.
+        run: echo "${{ github.sha }}" > api/build-stamp.txt
+
+      - name: Azure login (OIDC, no password)
+        if: inputs.api_deploy_mode == 'run-from-package'
+        uses: azure/login@v2
+        with:
+          client-id: ${{ inputs.azure_client_id }}
+          tenant-id: ${{ inputs.azure_tenant_id }}
+          subscription-id: ${{ inputs.azure_subscription_id }}
+
+      - name: Package, upload and flip run-from-package
+        if: inputs.api_deploy_mode == 'run-from-package'
+        run: |
+          set -euo pipefail
+          cd api
+          # Zip from inside api/ so host.json + function_app.py sit at the
+          # package root, where the Functions host expects them.
+          zip -qr "../${{ inputs.function_app }}-${{ github.sha }}.zip" . \
+            -x '*.pyc' -x '*/__pycache__/*' -x 'local.settings.json*'
+          cd ..
+          az storage blob upload \
+            --account-name "${{ inputs.storage_account }}" \
+            --container-name "${{ inputs.releases_container }}" \
+            --name "${{ inputs.function_app }}-${{ github.sha }}.zip" \
+            --file "${{ inputs.function_app }}-${{ github.sha }}.zip" \
+            --auth-mode login --overwrite --only-show-errors
+          PKG_URL="https://${{ inputs.storage_account }}.blob.core.windows.net/${{ inputs.releases_container }}/${{ inputs.function_app }}-${{ github.sha }}.zip"
+          az functionapp config appsettings set \
+            -g "${{ inputs.resource_group }}" -n "${{ inputs.function_app }}" \
+            --settings "WEBSITE_RUN_FROM_PACKAGE=${PKG_URL}" "APP_VERSION=${{ github.sha }}" \
+            --only-show-errors --output none
+          az functionapp restart \
+            -g "${{ inputs.resource_group }}" -n "${{ inputs.function_app }}" \
+            --only-show-errors
+          echo "Deployed ${PKG_URL}"
+
+      - name: Deploy Function App (publish profile)
+        if: inputs.api_deploy_mode == 'publish-profile'
+        uses: Azure/functions-action@v1
+        with:
+          app-name: ${{ inputs.function_app }}
+          package: api
+          publish-profile: ${{ secrets.AZURE_FUNCTIONAPP_PUBLISH_PROFILE }}
+          scm-do-build-during-deployment: false
+          enable-oryx-build: false
+
+      - name: Post-deploy publishing
+        if: inputs.post_deploy_script != ''
+        run: ${{ inputs.post_deploy_script }}
+
+      - name: Smoke test the deployed host
+        # A restart command returning is not a working host: the v2 indexer
+        # re-imports every module on start, and one bad import zeroes the
+        # whole app with a green tick on the deploy. Wait for the new build,
+        # not merely for an answer.
+        run: |
+          set -euo pipefail
+          BASE="https://${{ inputs.function_app }}.azurewebsites.net"
+          EXPECT_SHA="${{ inputs.smoke_expect_sha }}"
+          live=""
+          for attempt in $(seq 1 20); do
+            if body=$(curl -fsS --max-time 20 "${BASE}${{ inputs.smoke_path }}" 2>/dev/null); then
+              live="$body"
+              if [ "$EXPECT_SHA" != "true" ]; then
+                break
+              fi
+              if echo "$body" | grep -q "${{ github.sha }}"; then
+                break
+              fi
+              echo "attempt ${attempt}: still serving the previous build"
+            else
+              echo "attempt ${attempt}: host not answering yet"
+            fi
+            sleep 15
+          done
+          if [ -z "${live:-}" ]; then
+            echo "::error::${{ inputs.smoke_path }} never answered after the deploy"
+            exit 1
+          fi
+          if [ "$EXPECT_SHA" = "true" ] && ! echo "$live" | grep -q "${{ github.sha }}"; then
+            echo "::error::host is answering but never started serving this commit"
+            exit 1
+          fi
+          echo "healthz: $live"

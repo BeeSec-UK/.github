@@ -1,0 +1,6 @@
+{
+    "name": "BeeSec app pipeline",
+    "description": "The house CI/CD for BeeSec app-shaped repos: one consolidated test gate (pytest, tsc -b, vitest) in front of SWA + Function App deploys, with the cost rules baked in.",
+    "iconName": "octicon package",
+    "categories": ["Python", "TypeScript"]
+}

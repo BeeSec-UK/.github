@@ -1,0 +1,39 @@
+# Starter for a BeeSec app-shaped repo (api/ Functions + web/ Vite SPA).
+# Fill in the four resource names and delete the inputs you do not need —
+# the full input list is documented in
+# BeeSec-UK/.github/.github/workflows/beesec-app.yml.
+
+name: Deploy $default-branch
+
+on:
+  push:
+    branches: [$default-branch]
+  pull_request:
+    branches: [$default-branch]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # drop if using api_deploy_mode: publish-profile
+
+# Cancel superseded PR runs; never cancel a main deploy mid-flight.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  pipeline:
+    uses: BeeSec-UK/.github/.github/workflows/beesec-app.yml@main
+    secrets: inherit
+    with:
+      function_app: func-CHANGEME-prod
+      resource_group: rg-CHANGEME-prod
+      storage_account: stCHANGEMEprod
+      azure_client_id: 00000000-0000-0000-0000-000000000000
+      azure_tenant_id: 7efd2461-9121-4d79-8c20-08c1564f2beb
+      azure_subscription_id: 00000000-0000-0000-0000-000000000000
+      frontend_build_env: |
+        VITE_PLATFORM_TENANT_ID=7efd2461-9121-4d79-8c20-08c1564f2beb
+        VITE_PLATFORM_CLIENT_ID=9bec4ecd-ac41-4f8e-a8f7-6317e195576e
+        VITE_PLATFORM_API_SCOPE=api://beesec-internal/CHANGEME.access
+        VITE_PLATFORM_API_BASE_URL=https://func-CHANGEME-prod.azurewebsites.net
