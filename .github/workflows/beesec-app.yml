@@ -182,9 +182,52 @@ jobs:
     # and the timeout is only stopping it being expensive.
     timeout-minutes: 15
     steps:
+
       - uses: actions/checkout@v4
         with:
           submodules: true
+
+      # SECRET SCAN FIRST, before anything expensive.
+      #
+      # Two credential dumps were found by accident on 2026-08-20, both from the
+      # same 2026-05-27 migration session and both sitting untracked for twelve
+      # weeks: apitoxin (Cosmos key, Nessus keys, production user/session
+      # exports) and swarm (ENTRA_CLIENT_SECRET for the SHARED registration,
+      # SWARM_JWT_SECRET, a storage connection string). Neither was found by
+      # looking. One surfaced during an unrelated dirty-tree sweep, the other
+      # during a Prettier failure three months later.
+      #
+      # BE CLEAR ABOUT WHAT THIS DOES AND DOES NOT CATCH. It would NOT have
+      # caught either of those, because they were never committed and CI only
+      # ever sees committed content. It catches the WORSE case -- a secret that
+      # does reach a branch and therefore GitHub. The local half of the problem
+      # needs a pre-commit hook and is not solved here.
+      #
+      # Config lives in BeeSec-UK/.github/.gitleaks.toml so the estate tunes it
+      # in ONE place. It extends the upstream default ruleset and narrows only
+      # the entropy-based `generic-api-key` rule, in paths where a key-shaped
+      # string is expected: samples, fixtures, tests, vendored source, bicep
+      # (listKeys/Key Vault references) and docs. High-confidence rules --
+      # private keys, AWS, Azure AD client secrets, GitHub tokens -- are
+      # untouched and still fire everywhere.
+      #
+      # Verified before adoption: 0 findings across all eight callers, while
+      # still flagging both real dumps (including azure-ad-client-secret) and a
+      # synthetic secret planted in an ordinary config.json. An allowlist that
+      # silences everything is worse than no scan, so both directions were
+      # tested.
+      - name: Secret scan (gitleaks)
+        run: |
+          set -euo pipefail
+          VER=8.28.0
+          curl -sSL --retry 3 -o /tmp/gl.tgz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${VER}/gitleaks_${VER}_linux_x64.tar.gz"
+          tar xzf /tmp/gl.tgz -C /tmp gitleaks
+          curl -sSL --retry 3 -o /tmp/gitleaks.toml \
+            https://raw.githubusercontent.com/BeeSec-UK/.github/main/.gitleaks.toml
+          # Scan the checked-out tree. `git` mode would rescan full history on
+          # every run for no extra safety once history is known clean.
+          /tmp/gitleaks dir . -c /tmp/gitleaks.toml --no-banner --redact --exit-code 1
 
       - name: Install system packages
         if: inputs.apt_packages != ''

@@ -1,0 +1,38 @@
+# BeeSec shared gitleaks config.
+#
+# Extends the upstream default ruleset and then narrows ONE rule.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Paths where a key-shaped string is expected and is not a secret"
+
+# Verified 2026-08-20 against all eight apps on the shared pipeline. Every
+# generic-api-key hit was in one of these, and none was a credential:
+#   local.settings.json.sample   sample config shipped for local dev
+#   **/tests/**, **/fixtures/**  test data with deliberately fake tokens
+#   infra/*.bicep                listKeys() expressions and Key Vault references
+#   **/vendor/**                 vendored third-party source
+#   docs/**.md                   documentation showing the shape of a value
+#
+# These are PATHS, not rules — a real AWS key or private key committed into any
+# of them is still caught, because only the entropy-based generic rule is noisy
+# enough to need this and the high-confidence rules are untouched.
+paths = [
+  '''.*\.sample$''',
+  '''.*\.example$''',
+  '''(^|/)tests?/''',
+  '''(^|/)fixtures?/''',
+  '''(^|/)vendor/''',
+  '''(^|/)node_modules/''',
+  '''(^|/)\.venv/''',
+  '''^infra/.*\.bicep$''',
+  '''^docs/.*\.md$''',
+  '''.*\.azurite\.ts$''',
+]
+
+# Azurite's emulator account is public and documented by Microsoft.
+regexTarget = "match"
+regexes = [
+  '''devstoreaccount1''',
+]
