@@ -171,6 +171,16 @@ jobs:
   gate:
     name: Tests (pytest + web gate)
     runs-on: ubuntu-latest
+    # Bounded because nothing else is. GitHub's default job timeout is 360
+    # minutes, and on 2026-08-19 a honeycomb PR run hung to exactly that --
+    # 360.8 minutes from ONE job, about 16% of the whole org's 30-day Actions
+    # consumption, while every other run that day finished in 2 to 6 minutes.
+    # This job normally takes ~2.8 min, so 15 leaves roughly 5x headroom and
+    # turns a hang into a 15-minute loss instead of a six-hour one.
+    #
+    # A cap is not a diagnosis. If runs start hitting it, something is wrong
+    # and the timeout is only stopping it being expensive.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
@@ -232,6 +242,8 @@ jobs:
     needs: gate
     if: inputs.deploy_swa && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
+    # ~1.8 min normally. See the note on `gate` for why this exists.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
@@ -264,6 +276,8 @@ jobs:
     needs: gate
     if: inputs.deploy_api && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
+    # ~1.6 min normally. See the note on `gate` for why this exists.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
