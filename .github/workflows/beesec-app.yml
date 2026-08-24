@@ -280,20 +280,179 @@ jobs:
         if: inputs.extra_gate_script != ''
         run: ${{ inputs.extra_gate_script }}
 
-  deploy_frontend:
-    name: Frontend (SWA)
+  # ---------------------------------------------------------------------------
+  # ONE DEPLOY JOB, NOT TWO.
+  #
+  # These were deploy_api and deploy_frontend, running in parallel off the same
+  # `needs: gate`. They were split because they are independent, which is true
+  # and was still the wrong shape, because GitHub bills every job rounded up to
+  # a whole minute. The API half averaged 1.6 minutes and the SWA half 1.8, so
+  # two jobs cost four billed minutes for 3.4 minutes of work, on every push to
+  # main, forever. Across the estate that rounding was 37% of the Actions bill.
+  #
+  # Merged, that same 3.4 minutes of work rounds once instead of twice and
+  # checks out once instead of twice, so it bills 4 minutes instead of 5.
+  # Measured against honeycomb's push-to-main volume that is roughly 118
+  # minutes a month recovered, and it scales with every app that adopts this
+  # pipeline.
+  #
+  # WHAT THIS COSTS. Wall-clock. The halves no longer overlap, so a deploy takes
+  # about 3.4 minutes instead of about 1.8. That is the trade and it is
+  # deliberate: nobody is watching a deploy finish, and the minutes are metered.
+  #
+  # WHY THE API GOES FIRST. Sequential execution means a failure in the first
+  # half stops the second, so the order decides which half-deployed state you
+  # can be left in. A new API serving an old frontend is the survivable one: the
+  # frontend calls endpoints that still exist. The reverse, a new frontend
+  # against an API that has not got its new endpoints yet, is the outage. So the
+  # API deploys and passes its smoke test before the SWA upload starts.
+  #
+  # BOTH HALVES REMAIN INDEPENDENTLY SWITCHABLE. The job-level `if` became a
+  # per-step `if` on every step, so `deploy_api: false` skips the API steps and
+  # `deploy_swa: false` skips the SWA steps exactly as before. stinger sets
+  # deploy_api: false and runs its own, and must keep working unchanged.
+  #
+  # TIMEOUT. 25, not 15. The two halves each had 15 and now run end to end in
+  # one job, and the API smoke test alone can legitimately spend 5 minutes
+  # waiting for a cold Consumption worker to serve the new build.
+  # ---------------------------------------------------------------------------
+  deploy:
+    name: Deploy (API then SWA)
     needs: gate
-    if: inputs.deploy_swa && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    if: (inputs.deploy_api || inputs.deploy_swa) && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
-    # ~1.8 min normally. See the note on `gate` for why this exists.
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
+      # submodules: true is the union of what the two jobs did. The SWA half
+      # needed them, the API half did not ask and is not harmed by having them.
       - uses: actions/checkout@v4
         with:
           submodules: true
 
+      # ======================= API (Function App) ==========================
+
+      - name: Set up Python
+        if: inputs.deploy_api
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python_version }}
+          cache: pip
+          cache-dependency-path: ${{ inputs.package_requirements_path }}
+
+      - name: Vendor dependencies into the package
+        if: inputs.deploy_api
+        run: |
+          python -m pip install --upgrade pip
+          pip install \
+            --platform manylinux2014_x86_64 \
+            --implementation cp \
+            --python-version ${{ inputs.python_version }} \
+            --only-binary=:all: \
+            --upgrade \
+            -r ${{ inputs.package_requirements_path }} \
+            --target="api/.python_packages/lib/site-packages"
+
+      - name: Stamp the build with the commit it came from
+        if: inputs.deploy_api
+        # functions-action and run-from-package can both report success while
+        # Linux Consumption serves the previous package for a while longer.
+        # The stamp (and APP_VERSION in run-from-package mode) is what lets
+        # the smoke step tell a fix that does not work from a fix that is
+        # not running.
+        run: echo "${{ github.sha }}" > api/build-stamp.txt
+
+      - name: Azure login (OIDC, no password)
+        if: inputs.deploy_api && inputs.api_deploy_mode == 'run-from-package'
+        uses: azure/login@v2
+        with:
+          client-id: ${{ inputs.azure_client_id }}
+          tenant-id: ${{ inputs.azure_tenant_id }}
+          subscription-id: ${{ inputs.azure_subscription_id }}
+
+      - name: Package, upload and flip run-from-package
+        if: inputs.deploy_api && inputs.api_deploy_mode == 'run-from-package'
+        run: |
+          set -euo pipefail
+          cd api
+          # Zip from inside api/ so host.json + function_app.py sit at the
+          # package root, where the Functions host expects them.
+          zip -qr "../${{ inputs.function_app }}-${{ github.sha }}.zip" . \
+            -x '*.pyc' -x '*/__pycache__/*' -x 'local.settings.json*'
+          cd ..
+          az storage blob upload \
+            --account-name "${{ inputs.storage_account }}" \
+            --container-name "${{ inputs.releases_container }}" \
+            --name "${{ inputs.function_app }}-${{ github.sha }}.zip" \
+            --file "${{ inputs.function_app }}-${{ github.sha }}.zip" \
+            --auth-mode login --overwrite --only-show-errors
+          PKG_URL="https://${{ inputs.storage_account }}.blob.core.windows.net/${{ inputs.releases_container }}/${{ inputs.function_app }}-${{ github.sha }}.zip"
+          az functionapp config appsettings set \
+            -g "${{ inputs.resource_group }}" -n "${{ inputs.function_app }}" \
+            --settings "WEBSITE_RUN_FROM_PACKAGE=${PKG_URL}" "APP_VERSION=${{ github.sha }}" \
+            --only-show-errors --output none
+          az functionapp restart \
+            -g "${{ inputs.resource_group }}" -n "${{ inputs.function_app }}" \
+            --only-show-errors
+          echo "Deployed ${PKG_URL}"
+
+      - name: Deploy Function App (publish profile)
+        if: inputs.deploy_api && inputs.api_deploy_mode == 'publish-profile'
+        uses: Azure/functions-action@v1
+        with:
+          app-name: ${{ inputs.function_app }}
+          package: api
+          publish-profile: ${{ secrets.AZURE_FUNCTIONAPP_PUBLISH_PROFILE }}
+          scm-do-build-during-deployment: false
+          enable-oryx-build: false
+
+      - name: Post-deploy publishing
+        if: inputs.deploy_api && inputs.post_deploy_script != ''
+        run: ${{ inputs.post_deploy_script }}
+
+      - name: Smoke test the deployed host
+        if: inputs.deploy_api
+        # A restart command returning is not a working host: the v2 indexer
+        # re-imports every module on start, and one bad import zeroes the
+        # whole app with a green tick on the deploy. Wait for the new build,
+        # not merely for an answer.
+        #
+        # This gate now also protects the SWA upload below, which is the point
+        # of putting the API first. A backend that never came up stops the
+        # frontend that would have called it from shipping.
+        run: |
+          set -euo pipefail
+          BASE="https://${{ inputs.function_app }}.azurewebsites.net"
+          EXPECT_SHA="${{ inputs.smoke_expect_sha }}"
+          live=""
+          for attempt in $(seq 1 20); do
+            if body=$(curl -fsS --max-time 20 "${BASE}${{ inputs.smoke_path }}" 2>/dev/null); then
+              live="$body"
+              if [ "$EXPECT_SHA" != "true" ]; then
+                break
+              fi
+              if echo "$body" | grep -q "${{ github.sha }}"; then
+                break
+              fi
+              echo "attempt ${attempt}: still serving the previous build"
+            else
+              echo "attempt ${attempt}: host not answering yet"
+            fi
+            sleep 15
+          done
+          if [ -z "${live:-}" ]; then
+            echo "::error::${{ inputs.smoke_path }} never answered after the deploy"
+            exit 1
+          fi
+          if [ "$EXPECT_SHA" = "true" ] && ! echo "$live" | grep -q "${{ github.sha }}"; then
+            echo "::error::host is answering but never started serving this commit"
+            exit 1
+          fi
+          echo "healthz: $live"
+
+      # ========================== Frontend (SWA) ===========================
+
       - name: Export build-time env
-        if: inputs.frontend_build_env != ''
+        if: inputs.deploy_swa && inputs.frontend_build_env != ''
         run: |
           while IFS= read -r line; do
             case "$line" in
@@ -324,17 +483,18 @@ jobs:
       # mean what they did. This step composes them into the built path and sets
       # skip_app_build, so callers need no edit.
       - name: Set up Node
-        if: inputs.app_build_command != ''
+        if: inputs.deploy_swa && inputs.app_build_command != ''
         uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node_version }}
 
       - name: Build frontend
-        if: inputs.app_build_command != ''
+        if: inputs.deploy_swa && inputs.app_build_command != ''
         working-directory: ${{ inputs.app_location }}
         run: ${{ inputs.app_build_command }}
 
       - name: Deploy SWA
+        if: inputs.deploy_swa
         uses: Azure/static-web-apps-deploy@v1
         with:
           azure_static_web_apps_api_token: ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN }}
@@ -348,123 +508,3 @@ jobs:
           api_location: ""
           output_location: ""
           skip_app_build: ${{ inputs.app_build_command != '' }}
-
-  deploy_api:
-    name: API (Function App)
-    needs: gate
-    if: inputs.deploy_api && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
-    runs-on: ubuntu-latest
-    # ~1.6 min normally. See the note on `gate` for why this exists.
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ inputs.python_version }}
-          cache: pip
-          cache-dependency-path: ${{ inputs.package_requirements_path }}
-
-      - name: Vendor dependencies into the package
-        run: |
-          python -m pip install --upgrade pip
-          pip install \
-            --platform manylinux2014_x86_64 \
-            --implementation cp \
-            --python-version ${{ inputs.python_version }} \
-            --only-binary=:all: \
-            --upgrade \
-            -r ${{ inputs.package_requirements_path }} \
-            --target="api/.python_packages/lib/site-packages"
-
-      - name: Stamp the build with the commit it came from
-        # functions-action and run-from-package can both report success while
-        # Linux Consumption serves the previous package for a while longer.
-        # The stamp (and APP_VERSION in run-from-package mode) is what lets
-        # the smoke step tell a fix that does not work from a fix that is
-        # not running.
-        run: echo "${{ github.sha }}" > api/build-stamp.txt
-
-      - name: Azure login (OIDC, no password)
-        if: inputs.api_deploy_mode == 'run-from-package'
-        uses: azure/login@v2
-        with:
-          client-id: ${{ inputs.azure_client_id }}
-          tenant-id: ${{ inputs.azure_tenant_id }}
-          subscription-id: ${{ inputs.azure_subscription_id }}
-
-      - name: Package, upload and flip run-from-package
-        if: inputs.api_deploy_mode == 'run-from-package'
-        run: |
-          set -euo pipefail
-          cd api
-          # Zip from inside api/ so host.json + function_app.py sit at the
-          # package root, where the Functions host expects them.
-          zip -qr "../${{ inputs.function_app }}-${{ github.sha }}.zip" . \
-            -x '*.pyc' -x '*/__pycache__/*' -x 'local.settings.json*'
-          cd ..
-          az storage blob upload \
-            --account-name "${{ inputs.storage_account }}" \
-            --container-name "${{ inputs.releases_container }}" \
-            --name "${{ inputs.function_app }}-${{ github.sha }}.zip" \
-            --file "${{ inputs.function_app }}-${{ github.sha }}.zip" \
-            --auth-mode login --overwrite --only-show-errors
-          PKG_URL="https://${{ inputs.storage_account }}.blob.core.windows.net/${{ inputs.releases_container }}/${{ inputs.function_app }}-${{ github.sha }}.zip"
-          az functionapp config appsettings set \
-            -g "${{ inputs.resource_group }}" -n "${{ inputs.function_app }}" \
-            --settings "WEBSITE_RUN_FROM_PACKAGE=${PKG_URL}" "APP_VERSION=${{ github.sha }}" \
-            --only-show-errors --output none
-          az functionapp restart \
-            -g "${{ inputs.resource_group }}" -n "${{ inputs.function_app }}" \
-            --only-show-errors
-          echo "Deployed ${PKG_URL}"
-
-      - name: Deploy Function App (publish profile)
-        if: inputs.api_deploy_mode == 'publish-profile'
-        uses: Azure/functions-action@v1
-        with:
-          app-name: ${{ inputs.function_app }}
-          package: api
-          publish-profile: ${{ secrets.AZURE_FUNCTIONAPP_PUBLISH_PROFILE }}
-          scm-do-build-during-deployment: false
-          enable-oryx-build: false
-
-      - name: Post-deploy publishing
-        if: inputs.post_deploy_script != ''
-        run: ${{ inputs.post_deploy_script }}
-
-      - name: Smoke test the deployed host
-        # A restart command returning is not a working host: the v2 indexer
-        # re-imports every module on start, and one bad import zeroes the
-        # whole app with a green tick on the deploy. Wait for the new build,
-        # not merely for an answer.
-        run: |
-          set -euo pipefail
-          BASE="https://${{ inputs.function_app }}.azurewebsites.net"
-          EXPECT_SHA="${{ inputs.smoke_expect_sha }}"
-          live=""
-          for attempt in $(seq 1 20); do
-            if body=$(curl -fsS --max-time 20 "${BASE}${{ inputs.smoke_path }}" 2>/dev/null); then
-              live="$body"
-              if [ "$EXPECT_SHA" != "true" ]; then
-                break
-              fi
-              if echo "$body" | grep -q "${{ github.sha }}"; then
-                break
-              fi
-              echo "attempt ${attempt}: still serving the previous build"
-            else
-              echo "attempt ${attempt}: host not answering yet"
-            fi
-            sleep 15
-          done
-          if [ -z "${live:-}" ]; then
-            echo "::error::${{ inputs.smoke_path }} never answered after the deploy"
-            exit 1
-          fi
-          if [ "$EXPECT_SHA" = "true" ] && ! echo "$live" | grep -q "${{ github.sha }}"; then
-            echo "::error::host is answering but never started serving this commit"
-            exit 1
-          fi
-          echo "healthz: $live"
