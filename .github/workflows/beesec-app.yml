@@ -170,7 +170,7 @@ on:
       runner:
         description: JSON array of runner labels. Default keeps GitHub-hosted; pass '["self-hosted","linux","x64"]' to run on the org self-hosted runner.
         type: string
-        default: '["ubuntu-latest"]'
+        default: '["self-hosted","linux","x64"]'
 
 jobs:
   gate:
