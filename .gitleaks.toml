@@ -32,7 +32,16 @@ paths = [
 ]
 
 # Azurite's emulator account is public and documented by Microsoft.
+#
+# App Insights connection strings are the same kind of thing: client-side
+# telemetry INGESTION config, not a credential. The InstrumentationKey is a
+# write-only ingestion id (no read access, no other resource) that Microsoft
+# documents as non-secret and every browser/mobile SDK ships in the public
+# bundle. On the fleet it arrives VITE_-prefixed, i.e. Vite inlines it into
+# the SPA bundle that every visitor downloads. Scoped to the InstrumentationKey
+# shape, so a real key elsewhere in the same string still fires.
 regexTarget = "match"
 regexes = [
   '''devstoreaccount1''',
+  '''InstrumentationKey=[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}''',
 ]
