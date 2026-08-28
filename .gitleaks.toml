@@ -29,6 +29,13 @@ paths = [
   '''^infra/.*\.bicep$''',
   '''^docs/.*\.md$''',
   '''.*\.azurite\.ts$''',
+  # scanner/app/data/attack_corpus.json is an adversarial-prompt corpus: a
+  # living set of TEST samples that embed deliberately fake, secret-shaped
+  # strings (e.g. "Access Code: ABC1234567890", example "tok_..." vendor
+  # tokens) to exercise the prompt-leakage detector. Every gitleaks release
+  # flags a different synthetic string in it, so a line-based ignore is
+  # unworkable; this is the same "fake tokens in test data" case as tests/.
+  '''(^|/)attack_corpus\.json$''',
 ]
 
 # Azurite's emulator account is public and documented by Microsoft.
