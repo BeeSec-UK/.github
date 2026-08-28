@@ -167,10 +167,15 @@ on:
         type: boolean
         default: false
 
+      runner:
+        description: JSON array of runner labels. Default keeps GitHub-hosted; pass '["self-hosted","linux","x64"]' to run on the org self-hosted runner.
+        type: string
+        default: '["ubuntu-latest"]'
+
 jobs:
   gate:
     name: Tests (pytest + web gate)
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(inputs.runner) }}
     # Bounded because nothing else is. GitHub's default job timeout is 360
     # minutes, and on 2026-08-19 a honeycomb PR run hung to exactly that --
     # 360.8 minutes from ONE job, about 16% of the whole org's 30-day Actions
@@ -284,7 +289,7 @@ jobs:
     name: Frontend (SWA)
     needs: gate
     if: inputs.deploy_swa && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(inputs.runner) }}
     # ~1.8 min normally. See the note on `gate` for why this exists.
     timeout-minutes: 15
     steps:
@@ -353,7 +358,7 @@ jobs:
     name: API (Function App)
     needs: gate
     if: inputs.deploy_api && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(inputs.runner) }}
     # ~1.6 min normally. See the note on `gate` for why this exists.
     timeout-minutes: 15
     steps:
