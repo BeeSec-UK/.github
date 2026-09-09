@@ -62,6 +62,16 @@ Two things reduce it, and they only work together:
    slower half rather than both; with one runner it gains nothing and costs
    a checkout, which is why it is opt-in.
 
+Measured on the first workstation runner (honeycomb#204, 2026-09-09): the
+web gate 1m52s and pytest 2m54s, against about 8 and 5.5 minutes on the
+Mele. One more step on a distribution `actions/setup-python` does not
+recognise (Linux Mint reports itself as `Linuxmint`, not Ubuntu): seed the
+runner's tool cache once from the matching
+[python-versions](https://github.com/actions/python-versions/releases)
+asset for the Ubuntu base, with `RUNNER_TOOL_CACHE=<runner>/_work/_tool
+./setup.sh`, and touch `<tool cache>/Python/<version>/x64.complete`; the
+action then finds it locally and downloads nothing.
+
 The apt step installs only what `dpkg` says is missing, so a runner that
 already has the packages never runs `apt-get`, and a workstation without
 passwordless sudo is not stopped by it.
