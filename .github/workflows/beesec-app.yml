@@ -167,6 +167,18 @@ on:
         type: boolean
         default: false
 
+      parallel_web_gate:
+        description: >-
+          Run the web gate (npm install, typecheck, vitest) as its own job
+          beside pytest instead of after it. Halves the wall clock of a run
+          that has two runners to land on, and costs a second checkout and
+          Node setup, so it is opt-in: only worth it for an app whose two
+          halves both run for minutes and whose runner pool has more than
+          one machine. With one runner the two jobs queue in series and
+          nothing is gained.
+        type: boolean
+        default: false
+
       runner:
         description: JSON array of runner labels. Default keeps GitHub-hosted; pass '["self-hosted","linux","x64"]' to run on the org self-hosted runner.
         type: string
@@ -257,11 +269,23 @@ jobs:
           # every run for no extra safety once history is known clean.
           /tmp/gitleaks dir . -c /tmp/gitleaks.toml --no-banner --redact --exit-code 1
 
+      # Only when something is missing. A self-hosted runner keeps its
+      # packages between runs, so on every run after the first this was an
+      # apt-get update for nothing, and on a workstation runner without
+      # passwordless sudo it was the one step that could not run at all.
       - name: Install system packages
         if: inputs.apt_packages != ''
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends ${{ inputs.apt_packages }}
+          missing=""
+          for p in ${{ inputs.apt_packages }}; do
+            dpkg -s "$p" >/dev/null 2>&1 || missing="$missing $p"
+          done
+          if [ -n "$missing" ]; then
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends $missing
+          else
+            echo "every package is already installed"
+          fi
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -282,7 +306,7 @@ jobs:
         run: python -m pytest ${{ inputs.pytest_args }}
 
       - name: Set up Node
-        if: inputs.has_web
+        if: inputs.has_web && !inputs.parallel_web_gate
         uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node_version }}
@@ -290,17 +314,17 @@ jobs:
           cache-dependency-path: web/package-lock.json
 
       - name: Install web dependencies
-        if: inputs.has_web
+        if: inputs.has_web && !inputs.parallel_web_gate
         working-directory: web
         run: ${{ inputs.npm_install_command }}
 
       - name: Typecheck
-        if: inputs.has_web
+        if: inputs.has_web && !inputs.parallel_web_gate
         working-directory: web
         run: ${{ inputs.typecheck_command }}
 
       - name: Frontend tests (vitest)
-        if: inputs.has_web && inputs.run_vitest
+        if: inputs.has_web && inputs.run_vitest && !inputs.parallel_web_gate
         working-directory: web
         run: ${{ inputs.vitest_command }}
 
@@ -308,10 +332,60 @@ jobs:
         if: inputs.extra_gate_script != ''
         run: ${{ inputs.extra_gate_script }}
 
+  # The web half of the gate as its own job, when the caller asks for it.
+  # Same steps `gate` runs for the web, minus the secret scan, which `gate`
+  # already did on the same commit. Skipped entirely, not run empty, when
+  # the caller has not opted in: an empty job is still a checkout on a
+  # runner, and the org's cost rule is that nothing under two minutes gets
+  # to be its own job.
+  gate_web:
+    name: Tests (web gate)
+    if: inputs.has_web && inputs.parallel_web_gate
+    runs-on: ${{ fromJSON(inputs.runner) }}
+    timeout-minutes: 15
+    steps:
+      - name: Reclaim the workspace from a root-owned build
+        run: |
+          if [ -d "$GITHUB_WORKSPACE" ]; then
+            sudo -n chown -Rh "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" || true
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install web dependencies
+        working-directory: web
+        run: ${{ inputs.npm_install_command }}
+
+      - name: Typecheck
+        working-directory: web
+        run: ${{ inputs.typecheck_command }}
+
+      - name: Frontend tests (vitest)
+        if: inputs.run_vitest
+        working-directory: web
+        run: ${{ inputs.vitest_command }}
+
   deploy_frontend:
     name: Frontend (SWA)
-    needs: gate
-    if: inputs.deploy_swa && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    # Both halves of the gate, where the web half ran at all. `always()` is
+    # what lets a skipped `gate_web` count: without it a skipped need skips
+    # every dependant. The result checks are what keep a failed or cancelled
+    # gate from deploying, which `always()` alone would allow.
+    needs: [gate, gate_web]
+    if: >-
+      always()
+      && needs.gate.result == 'success'
+      && (needs.gate_web.result == 'success' || needs.gate_web.result == 'skipped')
+      && inputs.deploy_swa && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ${{ fromJSON(inputs.runner) }}
     # ~1.8 min normally. See the note on `gate` for why this exists.
     timeout-minutes: 15
@@ -403,8 +477,12 @@ jobs:
 
   deploy_api:
     name: API (Function App)
-    needs: gate
-    if: inputs.deploy_api && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    needs: [gate, gate_web]
+    if: >-
+      always()
+      && needs.gate.result == 'success'
+      && (needs.gate_web.result == 'success' || needs.gate_web.result == 'skipped')
+      && inputs.deploy_api && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ${{ fromJSON(inputs.runner) }}
     # ~1.6 min normally. See the note on `gate` for why this exists.
     timeout-minutes: 15
