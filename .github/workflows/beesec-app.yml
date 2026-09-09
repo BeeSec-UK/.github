@@ -167,6 +167,19 @@ on:
         type: boolean
         default: false
 
+      prefer_runner:
+        description: >-
+          JSON array of labels for the runner to PREFER, used only while one
+          of them is online and idle. GitHub itself has no preference between
+          matching runners: a queued job goes to whichever answers first, and
+          a box that polls faster wins every race. So a short first job asks
+          the API which preferred runner is free and hands the rest of the
+          run its runs-on: the preferred labels when one is free, `runner`
+          otherwise. Needs RUNNER_STATUS_TOKEN (see the pick job); without it,
+          or with this empty, the run uses `runner` exactly as before.
+        type: string
+        default: ''
+
       parallel_web_gate:
         description: >-
           Run the web gate (npm install, typecheck, vitest) as its own job
@@ -185,9 +198,57 @@ on:
         default: '["self-hosted","linux","x64"]'
 
 jobs:
+  # Which runner the rest of the run lands on. See `prefer_runner`. The
+  # runners API needs a token that may list runners, which GITHUB_TOKEN
+  # cannot: RUNNER_STATUS_TOKEN is a fine-grained PAT with read on
+  # "Administration" for the repo (or "Self-hosted runners" on the org),
+  # stored as an org secret. Every failure, a missing token, a 403, a
+  # network blip, falls back to `runner`, so this job can slow a run down
+  # by twenty seconds and can never stop one. The status is read at the
+  # repo AND the org, because a workstation may be registered at either.
+  pick:
+    name: Pick a runner
+    runs-on: ${{ fromJSON(inputs.runner) }}
+    timeout-minutes: 3
+    outputs:
+      labels: ${{ steps.pick.outputs.labels }}
+    steps:
+      - id: pick
+        env:
+          PREFER: ${{ inputs.prefer_runner }}
+          DEFAULT: ${{ inputs.runner }}
+          TOKEN: ${{ secrets.RUNNER_STATUS_TOKEN }}
+          REPO: ${{ github.repository }}
+          ORG: ${{ github.repository_owner }}
+        run: |
+          set -u
+          choose="$DEFAULT"
+          if [ -n "$PREFER" ] && [ -n "${TOKEN:-}" ]; then
+            want=$(printf '%s' "$PREFER" | jq -r '.[]' | tr 'A-Z' 'a-z' | sort)
+            free=0
+            for scope in "repos/$REPO" "orgs/$ORG"; do
+              json=$(curl -sS --max-time 15 -H "Authorization: Bearer $TOKEN"                        -H "Accept: application/vnd.github+json"                        "https://api.github.com/$scope/actions/runners?per_page=100" 2>/dev/null) || continue
+              n=$(printf '%s' "$json" | jq -r --argjson want "$(printf '%s' "$PREFER" | jq -c '[.[]|ascii_downcase]')" '
+                [ .runners[]? | select(.status=="online" and .busy==false)
+                  | [.labels[].name | ascii_downcase] as $have
+                  | select(($want - $have) == []) ] | length' 2>/dev/null || echo 0)
+              free=$((free + ${n:-0}))
+            done
+            if [ "${free:-0}" -gt 0 ]; then
+              choose="$PREFER"
+              echo "preferred runner free ($free idle): $PREFER"
+            else
+              echo "no preferred runner idle; using $DEFAULT"
+            fi
+          else
+            echo "no preference or no RUNNER_STATUS_TOKEN; using $DEFAULT"
+          fi
+          echo "labels=$choose" >> "$GITHUB_OUTPUT"
+
   gate:
     name: Tests (pytest + web gate)
-    runs-on: ${{ fromJSON(inputs.runner) }}
+    needs: pick
+    runs-on: ${{ fromJSON(needs.pick.outputs.labels) }}
     # Bounded because nothing else is. GitHub's default job timeout is 360
     # minutes, and on 2026-08-19 a honeycomb PR run hung to exactly that --
     # 360.8 minutes from ONE job, about 16% of the whole org's 30-day Actions
@@ -340,8 +401,9 @@ jobs:
   # to be its own job.
   gate_web:
     name: Tests (web gate)
+    needs: pick
     if: inputs.has_web && inputs.parallel_web_gate
-    runs-on: ${{ fromJSON(inputs.runner) }}
+    runs-on: ${{ fromJSON(needs.pick.outputs.labels) }}
     timeout-minutes: 15
     steps:
       - name: Reclaim the workspace from a root-owned build
@@ -380,13 +442,13 @@ jobs:
     # what lets a skipped `gate_web` count: without it a skipped need skips
     # every dependant. The result checks are what keep a failed or cancelled
     # gate from deploying, which `always()` alone would allow.
-    needs: [gate, gate_web]
+    needs: [pick, gate, gate_web]
     if: >-
       always()
       && needs.gate.result == 'success'
       && (needs.gate_web.result == 'success' || needs.gate_web.result == 'skipped')
       && inputs.deploy_swa && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
-    runs-on: ${{ fromJSON(inputs.runner) }}
+    runs-on: ${{ fromJSON(needs.pick.outputs.labels) }}
     # ~1.8 min normally. See the note on `gate` for why this exists.
     timeout-minutes: 15
     steps:
@@ -477,13 +539,13 @@ jobs:
 
   deploy_api:
     name: API (Function App)
-    needs: [gate, gate_web]
+    needs: [pick, gate, gate_web]
     if: >-
       always()
       && needs.gate.result == 'success'
       && (needs.gate_web.result == 'success' || needs.gate_web.result == 'skipped')
       && inputs.deploy_api && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
-    runs-on: ${{ fromJSON(inputs.runner) }}
+    runs-on: ${{ fromJSON(needs.pick.outputs.labels) }}
     # ~1.6 min normally. See the note on `gate` for why this exists.
     timeout-minutes: 15
     steps:
