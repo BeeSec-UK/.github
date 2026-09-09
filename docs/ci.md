@@ -33,6 +33,49 @@ duplicate runs on rapid pushes, and PR preview deploys nobody used.
 Shell/tool repos (forager, claude-project-setup, pawdit …) keep their own
 workflows but follow the same rules — rule 1 is usually the whole saving.
 
+## Runners, and why a run takes fourteen minutes
+
+Since the runner default moved to `self-hosted`, every app's CI queues on
+the one org runner, the Mele. Measured on honeycomb on 2026-09-09: pytest
+307s, vitest 375s, tsc 63s, the whole test job 14 minutes, against 35s,
+90s and 10s for the same steps on a developer laptop. One runner also
+means one run at a time, so four PRs and their merges in an afternoon
+queue for over an hour, and the 15-minute job timeout is a minute away.
+
+Two things reduce it, and they only work together:
+
+1. **More runners on the same labels.** A workstation registered with the
+   default labels (`self-hosted`, `linux`, `x64`) takes the next queued job
+   whenever it is on, and is roughly seven times faster than the Mele on
+   these suites. Register it at repo level (a repo admin can mint the token
+   through `POST /repos/{org}/{repo}/actions/runners/registration-token`)
+   or at org level (needs `admin:org` on the `gh` token, then
+   `POST /orgs/{org}/actions/runners/registration-token`), with
+   `./config.sh --unattended --url <repo or org url> --token <token>
+   --labels workstation` from the unpacked runner, then `sudo ./svc.sh
+   install && sudo ./svc.sh start` to run it as a service. Docker, the Azure
+   CLI and the app's apt packages must be present, because the deploy jobs
+   land there too. The Mele stays the floor: a workstation runner helps only
+   while that machine is on.
+2. **`parallel_web_gate: true`** in the caller, which runs the web half of
+   the gate as its own job beside pytest. With two runners a run takes the
+   slower half rather than both; with one runner it gains nothing and costs
+   a checkout, which is why it is opt-in.
+
+Measured on the first workstation runner (honeycomb#204, 2026-09-09): the
+web gate 1m52s and pytest 2m54s, against about 8 and 5.5 minutes on the
+Mele. One more step on a distribution `actions/setup-python` does not
+recognise (Linux Mint reports itself as `Linuxmint`, not Ubuntu): seed the
+runner's tool cache once from the matching
+[python-versions](https://github.com/actions/python-versions/releases)
+asset for the Ubuntu base, with `RUNNER_TOOL_CACHE=<runner>/_work/_tool
+./setup.sh`, and touch `<tool cache>/Python/<version>/x64.complete`; the
+action then finds it locally and downloads nothing.
+
+The apt step installs only what `dpkg` says is missing, so a runner that
+already has the packages never runs `apt-get`, and a workstation without
+passwordless sudo is not stopped by it.
+
 ## The billing backstop (org owners)
 
 Budget alerts at 75/90% of the Actions allowance under Organisation
