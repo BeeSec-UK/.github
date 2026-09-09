@@ -187,6 +187,29 @@ jobs:
     # and the timeout is only stopping it being expensive.
     timeout-minutes: 15
     steps:
+      # A self-hosted runner keeps its workspace between runs, and the SWA
+      # deploy is a Docker action that runs as root and does its own
+      # `npm install && npm run build` inside it. That leaves a root-owned
+      # `web/` behind, and the next job to land on that runner cannot clean
+      # it: `git clean -ffdx` reports "Permission denied" on every file,
+      # checkout falls back to recreating the repository, and that dies on
+      # `EACCES: permission denied, unlink .../web/.env.example` before a
+      # line of the job has run. It is not the job that caused it that pays
+      # — propolis PRs 78 and 79 died here on 9 Sep 2026 in the gate, which
+      # never builds the SPA, and apiary has had the same.
+      #
+      # So every job reclaims the workspace before checking out. `sudo` is
+      # passwordless for the runner account on the self-hosted boxes and the
+      # whole thing is swallowed, so this is a no-op on a GitHub-hosted
+      # runner where the workspace is fresh anyway. Nothing is deleted here:
+      # checkout's own `git clean` does the deleting, and ownership was the
+      # only thing standing in its way. `-h` so the symlink farm in
+      # `node_modules/.bin` is retargeted rather than followed.
+      - name: Reclaim the workspace from a root-owned build
+        run: |
+          if [ -d "$GITHUB_WORKSPACE" ]; then
+            sudo -n chown -Rh "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" || true
+          fi
 
       - uses: actions/checkout@v4
         with:
@@ -293,6 +316,30 @@ jobs:
     # ~1.8 min normally. See the note on `gate` for why this exists.
     timeout-minutes: 15
     steps:
+      # A self-hosted runner keeps its workspace between runs, and the SWA
+      # deploy is a Docker action that runs as root and does its own
+      # `npm install && npm run build` inside it. That leaves a root-owned
+      # `web/` behind, and the next job to land on that runner cannot clean
+      # it: `git clean -ffdx` reports "Permission denied" on every file,
+      # checkout falls back to recreating the repository, and that dies on
+      # `EACCES: permission denied, unlink .../web/.env.example` before a
+      # line of the job has run. It is not the job that caused it that pays
+      # — propolis PRs 78 and 79 died here on 9 Sep 2026 in the gate, which
+      # never builds the SPA, and apiary has had the same.
+      #
+      # So every job reclaims the workspace before checking out. `sudo` is
+      # passwordless for the runner account on the self-hosted boxes and the
+      # whole thing is swallowed, so this is a no-op on a GitHub-hosted
+      # runner where the workspace is fresh anyway. Nothing is deleted here:
+      # checkout's own `git clean` does the deleting, and ownership was the
+      # only thing standing in its way. `-h` so the symlink farm in
+      # `node_modules/.bin` is retargeted rather than followed.
+      - name: Reclaim the workspace from a root-owned build
+        run: |
+          if [ -d "$GITHUB_WORKSPACE" ]; then
+            sudo -n chown -Rh "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" || true
+          fi
+
       - uses: actions/checkout@v4
         with:
           submodules: true
@@ -362,6 +409,30 @@ jobs:
     # ~1.6 min normally. See the note on `gate` for why this exists.
     timeout-minutes: 15
     steps:
+      # A self-hosted runner keeps its workspace between runs, and the SWA
+      # deploy is a Docker action that runs as root and does its own
+      # `npm install && npm run build` inside it. That leaves a root-owned
+      # `web/` behind, and the next job to land on that runner cannot clean
+      # it: `git clean -ffdx` reports "Permission denied" on every file,
+      # checkout falls back to recreating the repository, and that dies on
+      # `EACCES: permission denied, unlink .../web/.env.example` before a
+      # line of the job has run. It is not the job that caused it that pays
+      # — propolis PRs 78 and 79 died here on 9 Sep 2026 in the gate, which
+      # never builds the SPA, and apiary has had the same.
+      #
+      # So every job reclaims the workspace before checking out. `sudo` is
+      # passwordless for the runner account on the self-hosted boxes and the
+      # whole thing is swallowed, so this is a no-op on a GitHub-hosted
+      # runner where the workspace is fresh anyway. Nothing is deleted here:
+      # checkout's own `git clean` does the deleting, and ownership was the
+      # only thing standing in its way. `-h` so the symlink farm in
+      # `node_modules/.bin` is retargeted rather than followed.
+      - name: Reclaim the workspace from a root-owned build
+        run: |
+          if [ -d "$GITHUB_WORKSPACE" ]; then
+            sudo -n chown -Rh "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" || true
+          fi
+
       - uses: actions/checkout@v4
 
       - name: Set up Python
