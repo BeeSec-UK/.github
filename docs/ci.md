@@ -47,7 +47,14 @@ Two things reduce it, and they only work together:
 1. **More runners on the same labels.** A workstation registered with the
    default labels (`self-hosted`, `linux`, `x64`) takes the next queued job
    whenever it is on, and is roughly seven times faster than the Mele on
-   these suites. Register it at repo level (a repo admin can mint the token
+   these suites. `scripts/workstation-runner.sh` does the whole
+   registration: download, the tool-cache seed below where it is needed,
+   the token through `gh`, and it prints the one `sudo` line that installs
+   the service. `--instances 2` on a big box registers two runners so it
+   takes two jobs at once, which is how a laptop becomes the machine most
+   runs land on while the Mele takes the rest. There is no priority between
+   runners: whichever is free takes the next job, and a machine that is off
+   takes nothing. By hand, register it at repo level (a repo admin can mint the token
    through `POST /repos/{org}/{repo}/actions/runners/registration-token`)
    or at org level (needs `admin:org` on the `gh` token, then
    `POST /orgs/{org}/actions/runners/registration-token`), with
