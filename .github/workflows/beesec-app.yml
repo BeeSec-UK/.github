@@ -222,6 +222,21 @@ on:
         type: boolean
         default: false
 
+    outputs:
+      # For a caller that keeps its own deploy jobs (propolis, apiary): the
+      # pick job's verdict, so `needs.pipeline.outputs.deploy_api == 'true'`
+      # gates a custom deploy the same way the built-in ones are gated.
+      # Always 'true' unless path_gates is on.
+      deploy_api:
+        description: Whether the change touched the API half (or path_gates is off).
+        value: ${{ jobs.pick.outputs.deploy_api }}
+      deploy_web:
+        description: Whether the change touched the web half (or path_gates is off).
+        value: ${{ jobs.pick.outputs.deploy_web }}
+      tests:
+        description: Whether the gate ran at all on this run.
+        value: ${{ jobs.pick.outputs.tests }}
+
 jobs:
   # Which runner the rest of the run lands on. See `prefer_runner`. The
   # runners API needs a token that may list runners, which GITHUB_TOKEN

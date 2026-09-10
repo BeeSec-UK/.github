@@ -114,6 +114,10 @@ moment anything is unreadable:
   before merge is what earns the skip. Needs `pull-requests: read` and
   `checks: read` in the caller's `permissions`.
 
+A caller that keeps its own deploy jobs (propolis, apiary) reads the same
+verdict from the reusable job's outputs: `if: needs.pipeline.outputs.deploy_api
+== 'true'` on its deploy job skips it for a change that never touched `api/`.
+
 The one habit that beats both: one branch with six small commits is one
 test run and one deploy; six PRs are six of each, and each merge cancels
 the deploy before it under the concurrency group.
