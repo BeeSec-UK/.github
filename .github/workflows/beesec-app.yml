@@ -197,6 +197,46 @@ on:
         type: string
         default: '["self-hosted","linux","x64"]'
 
+      path_gates:
+        description: >-
+          Run only the half of the gate the change touched, and deploy only
+          the half it touched. The pick job reads the changed files from the
+          compare API: `api/`, `docs/templates/` and `.github/` are the API
+          half, `web/` and `.github/` the web half, and a change outside
+          both (docs, README, scripts, the capability map) runs no tests and
+          deploys nothing. Any failure to read the diff runs everything. The
+          secret scan still runs on every push, in the pick job when the
+          gate is skipped. Opt-in per caller; needs only `contents: read`.
+        type: boolean
+        default: false
+
+      trust_pr_gate:
+        description: >-
+          On a push to main that is the squash merge of a pull request, skip
+          the tests when the pushed commit's TREE is the tree the PR's head
+          already passed the gate on: the same files, byte for byte, so the
+          same tests would give the same answer. A PR merged behind main has
+          a different tree and is tested again. Needs `pull-requests: read`
+          and `checks: read` in the caller's permissions; without them, or on
+          any API failure, the tests run as before. Opt-in per caller.
+        type: boolean
+        default: false
+
+    outputs:
+      # For a caller that keeps its own deploy jobs (propolis, apiary): the
+      # pick job's verdict, so `needs.pipeline.outputs.deploy_api == 'true'`
+      # gates a custom deploy the same way the built-in ones are gated.
+      # Always 'true' unless path_gates is on.
+      deploy_api:
+        description: Whether the change touched the API half (or path_gates is off).
+        value: ${{ jobs.pick.outputs.deploy_api }}
+      deploy_web:
+        description: Whether the change touched the web half (or path_gates is off).
+        value: ${{ jobs.pick.outputs.deploy_web }}
+      tests:
+        description: Whether the gate ran at all on this run.
+        value: ${{ jobs.pick.outputs.tests }}
+
 jobs:
   # Which runner the rest of the run lands on. See `prefer_runner`. The
   # runners API needs a token that may list runners, which GITHUB_TOKEN
@@ -212,6 +252,11 @@ jobs:
     timeout-minutes: 3
     outputs:
       labels: ${{ steps.pick.outputs.labels }}
+      api: ${{ steps.scope.outputs.api }}
+      web: ${{ steps.scope.outputs.web }}
+      tests: ${{ steps.scope.outputs.tests }}
+      deploy_api: ${{ steps.scope.outputs.deploy_api }}
+      deploy_web: ${{ steps.scope.outputs.deploy_web }}
     steps:
       - id: pick
         env:
@@ -245,9 +290,127 @@ jobs:
           fi
           echo "labels=$choose" >> "$GITHUB_OUTPUT"
 
+      # What this run has to do. Two opt-in narrowings, each answered from
+      # the API without a checkout, each falling back to "everything" the
+      # moment anything is unreadable, because a run that does too much is
+      # a cost and a run that does too little is a deploy nobody tested.
+      #
+      #   path_gates     which halves the change touched (see the input)
+      #   trust_pr_gate  whether main's tree is one a PR already passed on
+      #
+      # The outputs gate the jobs below: `tests` whether the gate runs at
+      # all, `api`/`web` which halves inside it, `deploy_*` which deploys.
+      - id: scope
+        env:
+          PATH_GATES: ${{ inputs.path_gates }}
+          TRUST: ${{ inputs.trust_pr_gate }}
+          HAS_WEB: ${{ inputs.has_web }}
+          PARALLEL_WEB: ${{ inputs.parallel_web_gate }}
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          SHA: ${{ github.sha }}
+          BEFORE: ${{ github.event.before }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -u
+          api=true; web=true; reason="everything: gates off"
+          gh_api() { curl -sS --max-time 20 -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" "https://api.github.com/$1"; }
+
+          if [ "$PATH_GATES" = "true" ]; then
+            range=""
+            case "$EVENT" in
+              pull_request) range="$PR_BASE...$PR_HEAD" ;;
+              push) case "$BEFORE" in 0000000000000000000000000000000000000000|"") range="" ;; *) range="$BEFORE...$SHA" ;; esac ;;
+            esac
+            files=""
+            if [ -n "$range" ]; then
+              cmp=$(gh_api "repos/$REPO/compare/$range?per_page=1" 2>/dev/null) || cmp=""
+              # An error body has no `files` array, and jq's length of null
+              # is 0, which would read as "nothing changed" and deploy
+              # nothing: so the array must be there, non-empty and under
+              # the API's 300-file cap, or the run does everything.
+              n=$(printf '%s' "$cmp" | jq -r 'if (.files|type)=="array" then (.files|length) else empty end' 2>/dev/null || echo "")
+              if [ -n "$n" ] && [ "$n" -gt 0 ] && [ "$n" -lt 300 ] 2>/dev/null; then
+                files=$(printf '%s' "$cmp" | jq -r '.files[].filename')
+                api=false; web=false
+                while IFS= read -r f; do
+                  [ -z "$f" ] && continue
+                  case "$f" in
+                    api/*|docs/templates/*|.github/*) api=true ;;
+                  esac
+                  case "$f" in
+                    web/*|.github/*) web=true ;;
+                  esac
+                done <<< "$files"
+                reason="changed: api=$api web=$web ($(printf '%s\n' "$files" | grep -c .) files)"
+              else
+                reason="everything: could not read the diff for $range"
+              fi
+            else
+              reason="everything: no range for event $EVENT"
+            fi
+          fi
+          [ "$HAS_WEB" = "true" ] || web=false
+
+          tests=true
+          if [ "$TRUST" = "true" ] && [ "$EVENT" = "push" ]; then
+            head=$(gh_api "repos/$REPO/commits/$SHA/pulls" 2>/dev/null | jq -r '[.[]|select(.merged_at!=null)][0].head.sha // empty' 2>/dev/null || echo "")
+            if [ -n "$head" ]; then
+              t1=$(gh_api "repos/$REPO/git/commits/$SHA" | jq -r '.tree.sha // empty' 2>/dev/null || echo "")
+              t2=$(gh_api "repos/$REPO/git/commits/$head" | jq -r '.tree.sha // empty' 2>/dev/null || echo "")
+              if [ -n "$t1" ] && [ "$t1" = "$t2" ]; then
+                runs=$(gh_api "repos/$REPO/commits/$head/check-runs?per_page=100" 2>/dev/null) || runs=""
+                ok_py=$(printf '%s' "$runs" | jq -r '[.check_runs[]?|select(.name|test("Tests \\(pytest"))|.conclusion]|first // empty' 2>/dev/null || echo "")
+                ok_web=success
+                if [ "$HAS_WEB" = "true" ] && [ "$PARALLEL_WEB" = "true" ]; then
+                  ok_web=$(printf '%s' "$runs" | jq -r '[.check_runs[]?|select(.name|test("Tests \\(web gate"))|.conclusion]|first // empty' 2>/dev/null || echo "")
+                fi
+                if [ "$ok_py" = "success" ] && [ "$ok_web" = "success" ]; then
+                  tests=false
+                  reason="$reason; tree $t1 already passed the gate on PR head ${head:0:7}"
+                else
+                  reason="$reason; PR head ${head:0:7} shares the tree but its gate was '$ok_py'/'$ok_web', testing again"
+                fi
+              else
+                reason="$reason; PR head ${head:0:7} has a different tree, testing again"
+              fi
+            else
+              reason="$reason; no merged PR found for $SHA, testing"
+            fi
+          fi
+          if [ "$api" != "true" ] && [ "$web" != "true" ]; then tests=false; fi
+
+          echo "$reason"
+          echo "api=$api" >> "$GITHUB_OUTPUT"
+          echo "web=$web" >> "$GITHUB_OUTPUT"
+          echo "tests=$tests" >> "$GITHUB_OUTPUT"
+          echo "deploy_api=$api" >> "$GITHUB_OUTPUT"
+          echo "deploy_web=$web" >> "$GITHUB_OUTPUT"
+
+      # The secret scan is the gate's first step, so a run that skips the
+      # gate would skip the scan with it. It runs here instead in that case,
+      # on the same commit, with the same config: a docs-only change is the
+      # kind of change a pasted key hides in.
+      - uses: actions/checkout@v4
+        if: steps.scope.outputs.tests != 'true'
+      - name: Secret scan (gitleaks), because the gate is skipped
+        if: steps.scope.outputs.tests != 'true'
+        run: |
+          set -euo pipefail
+          VER=8.28.0
+          curl -sSL --retry 3 -o /tmp/gl.tgz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${VER}/gitleaks_${VER}_linux_x64.tar.gz"
+          tar xzf /tmp/gl.tgz -C /tmp gitleaks
+          curl -sSL --retry 3 -o /tmp/gitleaks.toml \
+            https://raw.githubusercontent.com/BeeSec-UK/.github/main/.gitleaks.toml
+          /tmp/gitleaks dir . -c /tmp/gitleaks.toml --no-banner --redact --exit-code 1
+
   gate:
     name: Tests (pytest + web gate)
     needs: pick
+    if: needs.pick.outputs.tests == 'true'
     runs-on: ${{ fromJSON(needs.pick.outputs.labels) }}
     # Bounded because nothing else is. GitHub's default job timeout is 360
     # minutes, and on 2026-08-19 a honeycomb PR run hung to exactly that --
@@ -350,7 +513,7 @@ jobs:
       # apt-get update for nothing, and on a workstation runner without
       # passwordless sudo it was the one step that could not run at all.
       - name: Install system packages
-        if: inputs.apt_packages != ''
+        if: inputs.apt_packages != '' && (needs.pick.outputs.api == 'true' || inputs.extra_gate_script != '')
         run: |
           missing=""
           for p in ${{ inputs.apt_packages }}; do
@@ -364,43 +527,55 @@ jobs:
           fi
 
       - name: Set up Python
+        if: needs.pick.outputs.api == 'true' || inputs.extra_gate_script != ''
         uses: actions/setup-python@v5
         with:
           python-version: ${{ inputs.python_version }}
-          cache: pip
+          # The GitHub cache only pays on a GitHub-hosted runner, whose disk
+          # is new every run. A self-hosted runner keeps ~/.cache/pip between
+          # runs, so restoring a tarball of it from GitHub is a download it
+          # does not need and, on a workstation's uplink, one it cannot
+          # finish: honeycomb's deploy on 2026-09-09 spent 14 minutes in
+          # "Set up Python" before "Aborting cache download as the download
+          # time exceeded the timeout", then pip used the local cache anyway
+          # (run 34372785601). The tests took 49 seconds.
+          cache: ${{ runner.environment == 'github-hosted' && 'pip' || '' }}
           cache-dependency-path: ${{ inputs.requirements_path }}
 
       - name: Install API dependencies
+        if: needs.pick.outputs.api == 'true' || inputs.extra_gate_script != ''
         run: |
           python -m pip install --upgrade pip
           pip install -r ${{ inputs.requirements_path }} ${{ inputs.extra_pip }}
 
       - name: Backend tests (pytest)
+        if: needs.pick.outputs.api == 'true'
         working-directory: ${{ inputs.pytest_workdir }}
         env:
           APP_ENV: local
         run: python -m pytest ${{ inputs.pytest_args }}
 
       - name: Set up Node
-        if: inputs.has_web && !inputs.parallel_web_gate
+        if: inputs.has_web && !inputs.parallel_web_gate && (needs.pick.outputs.web == 'true' || inputs.extra_gate_script != '')
         uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node_version }}
-          cache: npm
+          # See the gate's Set up Python: no GitHub cache on a self-hosted box.
+          cache: ${{ runner.environment == 'github-hosted' && 'npm' || '' }}
           cache-dependency-path: web/package-lock.json
 
       - name: Install web dependencies
-        if: inputs.has_web && !inputs.parallel_web_gate
+        if: inputs.has_web && !inputs.parallel_web_gate && (needs.pick.outputs.web == 'true' || inputs.extra_gate_script != '')
         working-directory: web
         run: ${{ inputs.npm_install_command }}
 
       - name: Typecheck
-        if: inputs.has_web && !inputs.parallel_web_gate
+        if: inputs.has_web && !inputs.parallel_web_gate && needs.pick.outputs.web == 'true'
         working-directory: web
         run: ${{ inputs.typecheck_command }}
 
       - name: Frontend tests (vitest)
-        if: inputs.has_web && inputs.run_vitest && !inputs.parallel_web_gate
+        if: inputs.has_web && inputs.run_vitest && !inputs.parallel_web_gate && needs.pick.outputs.web == 'true'
         working-directory: web
         run: ${{ inputs.vitest_command }}
 
@@ -417,7 +592,7 @@ jobs:
   gate_web:
     name: Tests (web gate)
     needs: pick
-    if: inputs.has_web && inputs.parallel_web_gate
+    if: inputs.has_web && inputs.parallel_web_gate && needs.pick.outputs.tests == 'true' && needs.pick.outputs.web == 'true'
     runs-on: ${{ fromJSON(needs.pick.outputs.labels) }}
     timeout-minutes: 15
     steps:
@@ -442,7 +617,8 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node_version }}
-          cache: npm
+          # See the gate's Set up Python: no GitHub cache on a self-hosted box.
+          cache: ${{ runner.environment == 'github-hosted' && 'npm' || '' }}
           cache-dependency-path: web/package-lock.json
 
       - name: Install web dependencies
@@ -465,10 +641,14 @@ jobs:
     # every dependant. The result checks are what keep a failed or cancelled
     # gate from deploying, which `always()` alone would allow.
     needs: [pick, gate, gate_web]
+    # A skipped gate counts only when the pick job skipped it on purpose:
+    # `tests` false means the tree already passed, or nothing testable
+    # changed, and in the second case `deploy_web` is false as well.
     if: >-
       always()
-      && needs.gate.result == 'success'
+      && (needs.gate.result == 'success' || (needs.gate.result == 'skipped' && needs.pick.outputs.tests != 'true'))
       && (needs.gate_web.result == 'success' || needs.gate_web.result == 'skipped')
+      && needs.pick.outputs.deploy_web == 'true'
       && inputs.deploy_swa && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ${{ fromJSON(needs.pick.outputs.labels) }}
     # ~1.8 min normally. See the note on `gate` for why this exists.
@@ -593,8 +773,9 @@ jobs:
     needs: [pick, gate, gate_web]
     if: >-
       always()
-      && needs.gate.result == 'success'
+      && (needs.gate.result == 'success' || (needs.gate.result == 'skipped' && needs.pick.outputs.tests != 'true'))
       && (needs.gate_web.result == 'success' || needs.gate_web.result == 'skipped')
+      && needs.pick.outputs.deploy_api == 'true'
       && inputs.deploy_api && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ${{ fromJSON(needs.pick.outputs.labels) }}
     # ~1.6 min normally. See the note on `gate` for why this exists.
@@ -645,7 +826,8 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ inputs.python_version }}
-          cache: pip
+          # See the gate's Set up Python: no GitHub cache on a self-hosted box.
+          cache: ${{ runner.environment == 'github-hosted' && 'pip' || '' }}
           cache-dependency-path: ${{ inputs.package_requirements_path }}
 
       - name: Vendor dependencies into the package
