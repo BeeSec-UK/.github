@@ -277,11 +277,26 @@ jobs:
       # runner where the workspace is fresh anyway. Nothing is deleted here:
       # checkout's own `git clean` does the deleting, and ownership was the
       # only thing standing in its way. `-h` so the symlink farm in
-      # `node_modules/.bin` is retargeted rather than followed.
+      # `node_modules/.bin` is retargeted rather than followed. Where the
+      # runner account has no passwordless sudo (a workstation registered by
+      # hand), the step cannot fix anything, so it names the foreign files
+      # in the log and lets checkout show its own error, which is a better
+      # trail than a silent `|| true` followed by an EACCES nobody can place.
+      #
+      # The job that leaves the mess behind, `deploy_frontend`, also hands
+      # the workspace back after its Docker step (see there), so a poisoned
+      # runner is the exception this step exists for and not the rule.
       - name: Reclaim the workspace from a root-owned build
         run: |
-          if [ -d "$GITHUB_WORKSPACE" ]; then
+          [ -d "$GITHUB_WORKSPACE" ] || exit 0
+          if sudo -n true 2>/dev/null; then
             sudo -n chown -Rh "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" || true
+          else
+            foreign=$(find "$GITHUB_WORKSPACE" ! -user "$(id -un)" -print 2>/dev/null | head -n 20)
+            if [ -n "$foreign" ]; then
+              echo "::warning::no passwordless sudo on this runner and the workspace holds files owned by another user; checkout may fail on them"
+              printf '%s\n' "$foreign"
+            fi
           fi
 
       - uses: actions/checkout@v4
@@ -408,8 +423,15 @@ jobs:
     steps:
       - name: Reclaim the workspace from a root-owned build
         run: |
-          if [ -d "$GITHUB_WORKSPACE" ]; then
+          [ -d "$GITHUB_WORKSPACE" ] || exit 0
+          if sudo -n true 2>/dev/null; then
             sudo -n chown -Rh "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" || true
+          else
+            foreign=$(find "$GITHUB_WORKSPACE" ! -user "$(id -un)" -print 2>/dev/null | head -n 20)
+            if [ -n "$foreign" ]; then
+              echo "::warning::no passwordless sudo on this runner and the workspace holds files owned by another user; checkout may fail on them"
+              printf '%s\n' "$foreign"
+            fi
           fi
 
       - uses: actions/checkout@v4
@@ -469,11 +491,26 @@ jobs:
       # runner where the workspace is fresh anyway. Nothing is deleted here:
       # checkout's own `git clean` does the deleting, and ownership was the
       # only thing standing in its way. `-h` so the symlink farm in
-      # `node_modules/.bin` is retargeted rather than followed.
+      # `node_modules/.bin` is retargeted rather than followed. Where the
+      # runner account has no passwordless sudo (a workstation registered by
+      # hand), the step cannot fix anything, so it names the foreign files
+      # in the log and lets checkout show its own error, which is a better
+      # trail than a silent `|| true` followed by an EACCES nobody can place.
+      #
+      # The job that leaves the mess behind, `deploy_frontend`, also hands
+      # the workspace back after its Docker step (see there), so a poisoned
+      # runner is the exception this step exists for and not the rule.
       - name: Reclaim the workspace from a root-owned build
         run: |
-          if [ -d "$GITHUB_WORKSPACE" ]; then
+          [ -d "$GITHUB_WORKSPACE" ] || exit 0
+          if sudo -n true 2>/dev/null; then
             sudo -n chown -Rh "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" || true
+          else
+            foreign=$(find "$GITHUB_WORKSPACE" ! -user "$(id -un)" -print 2>/dev/null | head -n 20)
+            if [ -n "$foreign" ]; then
+              echo "::warning::no passwordless sudo on this runner and the workspace holds files owned by another user; checkout may fail on them"
+              printf '%s\n' "$foreign"
+            fi
           fi
 
       - uses: actions/checkout@v4
@@ -537,6 +574,20 @@ jobs:
           output_location: ""
           skip_app_build: ${{ inputs.app_build_command != '' }}
 
+      # The cause of the root-owned workspace, handled at the source. The step
+      # above runs as root inside a container with the workspace mounted, and
+      # what it writes stays root-owned on a self-hosted runner after the job
+      # ends, poisoning the next checkout to land there (propolis#77). Hand
+      # the workspace back to the runner account before leaving, whether the
+      # deploy succeeded or not: `always()` so a failed deploy still cleans
+      # up, and swallowed so a runner without sudo, or a GitHub-hosted one
+      # about to be discarded, is not failed by it.
+      - name: Hand the workspace back after the root-owned deploy
+        if: always()
+        run: |
+          [ -d "$GITHUB_WORKSPACE" ] || exit 0
+          sudo -n chown -Rh "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" 2>/dev/null || true
+
   deploy_api:
     name: API (Function App)
     needs: [pick, gate, gate_web]
@@ -566,11 +617,26 @@ jobs:
       # runner where the workspace is fresh anyway. Nothing is deleted here:
       # checkout's own `git clean` does the deleting, and ownership was the
       # only thing standing in its way. `-h` so the symlink farm in
-      # `node_modules/.bin` is retargeted rather than followed.
+      # `node_modules/.bin` is retargeted rather than followed. Where the
+      # runner account has no passwordless sudo (a workstation registered by
+      # hand), the step cannot fix anything, so it names the foreign files
+      # in the log and lets checkout show its own error, which is a better
+      # trail than a silent `|| true` followed by an EACCES nobody can place.
+      #
+      # The job that leaves the mess behind, `deploy_frontend`, also hands
+      # the workspace back after its Docker step (see there), so a poisoned
+      # runner is the exception this step exists for and not the rule.
       - name: Reclaim the workspace from a root-owned build
         run: |
-          if [ -d "$GITHUB_WORKSPACE" ]; then
+          [ -d "$GITHUB_WORKSPACE" ] || exit 0
+          if sudo -n true 2>/dev/null; then
             sudo -n chown -Rh "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" || true
+          else
+            foreign=$(find "$GITHUB_WORKSPACE" ! -user "$(id -un)" -print 2>/dev/null | head -n 20)
+            if [ -n "$foreign" ]; then
+              echo "::warning::no passwordless sudo on this runner and the workspace holds files owned by another user; checkout may fail on them"
+              printf '%s\n' "$foreign"
+            fi
           fi
 
       - uses: actions/checkout@v4
