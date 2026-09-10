@@ -83,6 +83,41 @@ The apt step installs only what `dpkg` says is missing, so a runner that
 already has the packages never runs `apt-get`, and a workstation without
 passwordless sudo is not stopped by it.
 
+## Why a small change still took forty minutes, and what cut it
+
+Measured on honeycomb run 34372785601 (2026-09-09, a workstation runner):
+the tests took 49 s and 30 s, and the run took 27 minutes. Set up Python
+was 358 s in the gate and 844 s in the deploy, Set up Node 169 s. The log
+says why: `Cache hit for: setup-python-…` and, fourteen minutes later,
+`Aborting cache download as the download time exceeded the timeout`, then
+pip printing `Using cached` from its own `~/.cache/pip` anyway. On a
+self-hosted runner the GitHub cache is a tarball of a directory the machine
+already has, pulled over a home uplink. The pipeline now asks for it only
+where `runner.environment` is `github-hosted`. No caller changes.
+
+Two opt-in narrowings on top of that, both decided in the `pick` job from
+the API without a checkout and both falling back to "run everything" the
+moment anything is unreadable:
+
+- **`path_gates: true`.** The compare API lists the changed files. `api/`,
+  `docs/templates/` and `.github/` are the API half, `web/` and `.github/`
+  the web half. A change touching only one half runs only that half's
+  tests and deploys only that half; a change touching neither (docs,
+  README, scripts, the capability map) runs no tests and deploys nothing.
+  The secret scan still runs on every push, in `pick` when the gate is
+  skipped. An empty diff, an error body or a diff over the API's 300-file
+  cap all mean everything. Needs only `contents: read`.
+- **`trust_pr_gate: true`.** A push to main that is the squash merge of a
+  PR is not re-tested when the pushed commit's *tree* is the tree the PR's
+  head already passed both gate jobs on: same bytes, same answer. A PR
+  merged behind main has a different tree and is tested again, so rebasing
+  before merge is what earns the skip. Needs `pull-requests: read` and
+  `checks: read` in the caller's `permissions`.
+
+The one habit that beats both: one branch with six small commits is one
+test run and one deploy; six PRs are six of each, and each merge cancels
+the deploy before it under the concurrency group.
+
 ## The billing backstop (org owners)
 
 Budget alerts at 75/90% of the Actions allowance under Organisation
