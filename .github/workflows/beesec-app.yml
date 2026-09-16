@@ -393,6 +393,35 @@ jobs:
       # gate would skip the scan with it. It runs here instead in that case,
       # on the same commit, with the same config: a docs-only change is the
       # kind of change a pasted key hides in.
+      # Same reclaim as the gate and deploy jobs below, and for the same
+      # reason: `deploy_frontend`'s Docker step writes root-owned files into
+      # the workspace, and checkout cannot delete what it does not own.
+      #
+      # This job was the one place still missing it, which is exactly where it
+      # bit. On 2026-09-15 a propolis merge to main skipped the gate (a trusted
+      # PR gate), so the checkout below ran, hit
+      # `EACCES: permission denied, unlink '.../web/.env.example'` on
+      # actions-runner-3 and failed the whole run. Every deploy job was skipped
+      # behind it, so `main` moved and production did not — the worst shape for
+      # this to fail in. checkout's own "the repository will be recreated
+      # instead" fallback does not rescue it; the annotation says it tried.
+      #
+      # Carries the same condition as the checkout it protects, so a run that
+      # does not check out here does not pay for this either.
+      - name: Reclaim the workspace from a root-owned build
+        if: steps.scope.outputs.tests != 'true'
+        run: |
+          [ -d "$GITHUB_WORKSPACE" ] || exit 0
+          if sudo -n true 2>/dev/null; then
+            sudo -n chown -Rh "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" || true
+          else
+            foreign=$(find "$GITHUB_WORKSPACE" ! -user "$(id -un)" -print 2>/dev/null | head -n 20)
+            if [ -n "$foreign" ]; then
+              echo "::warning::no passwordless sudo on this runner and the workspace holds files owned by another user; checkout may fail on them"
+              printf '%s\n' "$foreign"
+            fi
+          fi
+
       - uses: actions/checkout@v4
         if: steps.scope.outputs.tests != 'true'
       - name: Secret scan (gitleaks), because the gate is skipped
