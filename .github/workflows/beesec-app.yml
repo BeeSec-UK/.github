@@ -27,7 +27,7 @@
 #     workflow_dispatch:
 #   permissions:
 #     contents: read
-#     id-token: write      # only needed for api_deploy_mode: run-from-package
+#     id-token: write      # only needed for api_deploy_mode: run-from-package or flex
 #   concurrency:
 #     group: ${{ github.workflow }}-${{ github.ref }}
 #     cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -42,8 +42,9 @@
 # Secrets are taken from the calling repo via `secrets: inherit`, under the
 # names the fleet already uses: AZURE_STATIC_WEB_APPS_API_TOKEN for the SWA
 # deploy and, in publish-profile mode only, AZURE_FUNCTIONAPP_PUBLISH_PROFILE.
-# run-from-package mode needs no stored secret at all — it authenticates by
-# OIDC as a managed identity federated to the caller repo's main branch.
+# run-from-package and flex modes need no stored secret at all — they
+# authenticate by OIDC as a managed identity federated to the caller repo's
+# main branch.
 
 name: BeeSec app pipeline
 
@@ -127,8 +128,11 @@ on:
         default: true
       api_deploy_mode:
         description: >-
-          'run-from-package' (preferred: OIDC managed identity, zip in the
-          releases container, no stored secret) or 'publish-profile'
+          'run-from-package' (OIDC managed identity, zip in the releases
+          container, no stored secret, Linux Consumption only), 'flex' (OIDC
+          managed identity, one-deploy zip push to a Flex Consumption app,
+          which rejects WEBSITE_RUN_FROM_PACKAGE; storage_account and
+          releases_container are unused) or 'publish-profile'
           (Azure/functions-action with the AZURE_FUNCTIONAPP_PUBLISH_PROFILE
           secret, for apps whose managed identity is not federated yet).
         type: string
@@ -146,7 +150,7 @@ on:
         type: string
         default: 'function-releases'
       azure_client_id:
-        description: Managed identity client id (public identifier, not a secret). run-from-package mode only.
+        description: Managed identity client id (public identifier, not a secret). run-from-package and flex modes only.
         type: string
         default: ''
       azure_tenant_id:
@@ -156,7 +160,7 @@ on:
         type: string
         default: ''
       post_deploy_script:
-        description: Extra publishing the deploy carries (e.g. honeycomb's house-template sync). Runs after the package flip, with the az OIDC session still live — run-from-package mode only.
+        description: Extra publishing the deploy carries (e.g. honeycomb's house-template sync). Runs after the package flip, with the az OIDC session still live — run-from-package and flex modes only.
         type: string
         default: ''
       smoke_path:
@@ -928,7 +932,7 @@ jobs:
         run: echo "${{ github.sha }}" > api/build-stamp.txt
 
       - name: Azure login (OIDC, no password)
-        if: inputs.api_deploy_mode == 'run-from-package'
+        if: inputs.api_deploy_mode == 'run-from-package' || inputs.api_deploy_mode == 'flex'
         uses: azure/login@v2
         with:
           client-id: ${{ inputs.azure_client_id }}
@@ -960,6 +964,32 @@ jobs:
             -g "${{ inputs.resource_group }}" -n "${{ inputs.function_app }}" \
             --only-show-errors
           echo "Deployed ${PKG_URL}"
+
+      - name: Package and one-deploy (Flex Consumption)
+        # New subscriptions get no Linux Consumption (Y1) quota, so apps
+        # rebuilt in their own subscription run on Flex Consumption. Flex
+        # takes the zip through its one-deploy endpoint into the deployment
+        # container on the app's own storage, read by the app's identity.
+        # Dependencies are already vendored into .python_packages above, so
+        # no remote build. APP_VERSION is written after the deploy so the
+        # restart it causes is onto the new code, never a stale worker
+        # claiming the new sha.
+        if: inputs.api_deploy_mode == 'flex'
+        run: |
+          set -euo pipefail
+          cd api
+          zip -qr "../${{ inputs.function_app }}-${{ github.sha }}.zip" . \
+            -x '*.pyc' -x '*/__pycache__/*' -x 'local.settings.json*'
+          cd ..
+          az functionapp deployment source config-zip \
+            -g "${{ inputs.resource_group }}" -n "${{ inputs.function_app }}" \
+            --src "${{ inputs.function_app }}-${{ github.sha }}.zip" \
+            --build-remote false --only-show-errors --output none
+          az functionapp config appsettings set \
+            -g "${{ inputs.resource_group }}" -n "${{ inputs.function_app }}" \
+            --settings "APP_VERSION=${{ github.sha }}" \
+            --only-show-errors --output none
+          echo "Deployed ${{ inputs.function_app }} at ${{ github.sha }}"
 
       - name: Deploy Function App (publish profile)
         if: inputs.api_deploy_mode == 'publish-profile'
