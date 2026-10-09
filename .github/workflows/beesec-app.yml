@@ -226,6 +226,18 @@ on:
         type: boolean
         default: false
 
+      swa_paths:
+        description: >-
+          Space-separated path prefixes whose change redeploys the Static Web
+          App, for a caller whose SPA is not in `web/` and so sets `has_web:
+          false`, e.g. apitoxin's `app-vite/ worker/`. Without it such a
+          caller's SWA never deploys at all, because `has_web: false` clears
+          the web half that `deploy_web` reads. Empty keeps the old rule, so
+          no other caller changes. Only the deploy follows it; the web gate
+          still needs `has_web`.
+        type: string
+        default: ''
+
     outputs:
       # For a caller that keeps its own deploy jobs (propolis, apiary): the
       # pick job's verdict, so `needs.pipeline.outputs.deploy_api == 'true'`
@@ -309,6 +321,7 @@ jobs:
           PATH_GATES: ${{ inputs.path_gates }}
           TRUST: ${{ inputs.trust_pr_gate }}
           HAS_WEB: ${{ inputs.has_web }}
+          SWA_PATHS: ${{ inputs.swa_paths }}
           PARALLEL_WEB: ${{ inputs.parallel_web_gate }}
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
@@ -319,7 +332,7 @@ jobs:
           PR_HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
           set -u
-          api=true; web=true; reason="everything: gates off"
+          api=true; web=true; swa=true; reason="everything: gates off"
           gh_api() { curl -sS --max-time 20 -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" "https://api.github.com/$1"; }
 
           if [ "$PATH_GATES" = "true" ]; then
@@ -338,9 +351,12 @@ jobs:
               n=$(printf '%s' "$cmp" | jq -r 'if (.files|type)=="array" then (.files|length) else empty end' 2>/dev/null || echo "")
               if [ -n "$n" ] && [ "$n" -gt 0 ] && [ "$n" -lt 300 ] 2>/dev/null; then
                 files=$(printf '%s' "$cmp" | jq -r '.files[].filename')
-                api=false; web=false
+                api=false; web=false; swa=false
                 while IFS= read -r f; do
                   [ -z "$f" ] && continue
+                  for p in $SWA_PATHS .github/; do
+                    case "$f" in "$p"*) swa=true ;; esac
+                  done
                   case "$f" in
                     api/*|docs/templates/*|.github/*) api=true ;;
                   esac
@@ -391,7 +407,11 @@ jobs:
           echo "web=$web" >> "$GITHUB_OUTPUT"
           echo "tests=$tests" >> "$GITHUB_OUTPUT"
           echo "deploy_api=$api" >> "$GITHUB_OUTPUT"
-          echo "deploy_web=$web" >> "$GITHUB_OUTPUT"
+          if [ -n "$SWA_PATHS" ]; then
+            echo "deploy_web=$swa" >> "$GITHUB_OUTPUT"
+          else
+            echo "deploy_web=$web" >> "$GITHUB_OUTPUT"
+          fi
 
       # The secret scan is the gate's first step, so a run that skips the
       # gate would skip the scan with it. It runs here instead in that case,
