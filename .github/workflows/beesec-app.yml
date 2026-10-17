@@ -980,6 +980,10 @@ jobs:
             -g "${{ inputs.resource_group }}" -n "${{ inputs.function_app }}" \
             --settings "WEBSITE_RUN_FROM_PACKAGE=${PKG_URL}" "APP_VERSION=${{ github.sha }}" \
             --only-show-errors --output none
+          # The settings write recycles the host itself. A restart in the same
+          # second loses that race and leaves the previous package serving,
+          # which smoke_expect_sha then fails on (honeycomb-dev, 2026-10-16).
+          sleep 30
           az functionapp restart \
             -g "${{ inputs.resource_group }}" -n "${{ inputs.function_app }}" \
             --only-show-errors
