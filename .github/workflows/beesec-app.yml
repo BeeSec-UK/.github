@@ -181,8 +181,10 @@ on:
           run its runs-on: the preferred labels when one is free, `runner`
           otherwise. Needs the beesec-runner-status app (see the pick job); without it,
           or with this empty, the run uses `runner` exactly as before.
+          Defaults to the GTX runners (label `gtx-host`). The test jobs
+          follow it; the deploy jobs never do.
         type: string
-        default: ''
+        default: '["gtx-host"]'
 
       parallel_web_gate:
         description: >-
@@ -197,9 +199,14 @@ on:
         default: false
 
       runner:
-        description: JSON array of runner labels. Default keeps GitHub-hosted; pass '["self-hosted","linux","x64"]' to run on the org self-hosted runner.
+        description: >-
+          JSON array of runner labels: the fallback the run uses when no
+          `prefer_runner` runner is idle, and always the runner for the pick
+          job and both deploy jobs. GitHub-hosted by default, so a run never
+          waits on a box that is off, and production is never deployed from
+          a self-hosted runner.
         type: string
-        default: '["self-hosted","linux","x64"]'
+        default: '["ubuntu-latest"]'
 
       path_gates:
         description: >-
@@ -447,9 +454,10 @@ jobs:
         if: steps.scope.outputs.tests != 'true'
         run: |
           [ -d "$GITHUB_WORKSPACE" ] || exit 0
-          if sudo -n true 2>/dev/null; then
-            sudo -n chown -Rh "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" || true
-          else
+          # Try the chown itself, not `sudo -n true`: the GTX runner account
+          # may run /usr/bin/chown and nothing else, so a bare `sudo true`
+          # fails there and the reclaim would never run.
+          if ! sudo -n chown -Rh "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" 2>/dev/null; then
             foreign=$(find "$GITHUB_WORKSPACE" ! -user "$(id -un)" -print 2>/dev/null | head -n 20)
             if [ -n "$foreign" ]; then
               echo "::warning::no passwordless sudo on this runner and the workspace holds files owned by another user; checkout may fail on them"
@@ -540,9 +548,10 @@ jobs:
       - name: Reclaim the workspace from a root-owned build
         run: |
           [ -d "$GITHUB_WORKSPACE" ] || exit 0
-          if sudo -n true 2>/dev/null; then
-            sudo -n chown -Rh "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" || true
-          else
+          # Try the chown itself, not `sudo -n true`: the GTX runner account
+          # may run /usr/bin/chown and nothing else, so a bare `sudo true`
+          # fails there and the reclaim would never run.
+          if ! sudo -n chown -Rh "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" 2>/dev/null; then
             foreign=$(find "$GITHUB_WORKSPACE" ! -user "$(id -un)" -print 2>/dev/null | head -n 20)
             if [ -n "$foreign" ]; then
               echo "::warning::no passwordless sudo on this runner and the workspace holds files owned by another user; checkout may fail on them"
@@ -711,9 +720,10 @@ jobs:
       - name: Reclaim the workspace from a root-owned build
         run: |
           [ -d "$GITHUB_WORKSPACE" ] || exit 0
-          if sudo -n true 2>/dev/null; then
-            sudo -n chown -Rh "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" || true
-          else
+          # Try the chown itself, not `sudo -n true`: the GTX runner account
+          # may run /usr/bin/chown and nothing else, so a bare `sudo true`
+          # fails there and the reclaim would never run.
+          if ! sudo -n chown -Rh "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" 2>/dev/null; then
             foreign=$(find "$GITHUB_WORKSPACE" ! -user "$(id -un)" -print 2>/dev/null | head -n 20)
             if [ -n "$foreign" ]; then
               echo "::warning::no passwordless sudo on this runner and the workspace holds files owned by another user; checkout may fail on them"
@@ -762,7 +772,10 @@ jobs:
       && (needs.gate_web.result == 'success' || needs.gate_web.result == 'skipped')
       && needs.pick.outputs.deploy_web == 'true'
       && inputs.deploy_swa && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
-    runs-on: ${{ fromJSON(needs.pick.outputs.labels) }}
+    # Always `runner` (GitHub-hosted by default), never the preferred
+    # runner: a production deploy holds the app's deploy identity and does
+    # not run on a self-hosted box.
+    runs-on: ${{ fromJSON(inputs.runner) }}
     # ~1.8 min normally. See the note on `gate` for why this exists.
     timeout-minutes: 15
     steps:
@@ -795,9 +808,10 @@ jobs:
       - name: Reclaim the workspace from a root-owned build
         run: |
           [ -d "$GITHUB_WORKSPACE" ] || exit 0
-          if sudo -n true 2>/dev/null; then
-            sudo -n chown -Rh "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" || true
-          else
+          # Try the chown itself, not `sudo -n true`: the GTX runner account
+          # may run /usr/bin/chown and nothing else, so a bare `sudo true`
+          # fails there and the reclaim would never run.
+          if ! sudo -n chown -Rh "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" 2>/dev/null; then
             foreign=$(find "$GITHUB_WORKSPACE" ! -user "$(id -un)" -print 2>/dev/null | head -n 20)
             if [ -n "$foreign" ]; then
               echo "::warning::no passwordless sudo on this runner and the workspace holds files owned by another user; checkout may fail on them"
@@ -889,7 +903,10 @@ jobs:
       && (needs.gate_web.result == 'success' || needs.gate_web.result == 'skipped')
       && needs.pick.outputs.deploy_api == 'true'
       && inputs.deploy_api && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
-    runs-on: ${{ fromJSON(needs.pick.outputs.labels) }}
+    # Always `runner` (GitHub-hosted by default), never the preferred
+    # runner: a production deploy holds the app's deploy identity and does
+    # not run on a self-hosted box.
+    runs-on: ${{ fromJSON(inputs.runner) }}
     # ~1.6 min normally. See the note on `gate` for why this exists.
     timeout-minutes: 15
     steps:
@@ -922,9 +939,10 @@ jobs:
       - name: Reclaim the workspace from a root-owned build
         run: |
           [ -d "$GITHUB_WORKSPACE" ] || exit 0
-          if sudo -n true 2>/dev/null; then
-            sudo -n chown -Rh "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" || true
-          else
+          # Try the chown itself, not `sudo -n true`: the GTX runner account
+          # may run /usr/bin/chown and nothing else, so a bare `sudo true`
+          # fails there and the reclaim would never run.
+          if ! sudo -n chown -Rh "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" 2>/dev/null; then
             foreign=$(find "$GITHUB_WORKSPACE" ! -user "$(id -un)" -print 2>/dev/null | head -n 20)
             if [ -n "$foreign" ]; then
               echo "::warning::no passwordless sudo on this runner and the workspace holds files owned by another user; checkout may fail on them"

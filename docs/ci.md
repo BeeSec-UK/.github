@@ -35,6 +35,21 @@ workflows but follow the same rules — rule 1 is usually the whole saving.
 
 ## Runners, and why a run takes fourteen minutes
 
+**Current pool (20 Oct 2026).** The Mele runners are retired. The test jobs
+prefer the three GTX runners at Tom's site (`beesec-runner-gtx`, `-gtx-2`,
+`-gtx-3`, label `gtx-host` only, 8 cores, 30 GB, Ubuntu 26.04) and fall back
+to GitHub-hosted `ubuntu-latest` when none is idle: `prefer_runner` defaults
+to `["gtx-host"]` and `runner` to `["ubuntu-latest"]`. The pick job and both
+deploy jobs always run on `runner`, so production is never deployed from a
+self-hosted box. The preference needs the runner-status app credentials in
+the calling repo: on GitHub Free an org secret does not reach a private
+repo, so each private caller carries repo variable `RUNNER_STATUS_APP_ID`
+and repo secret `RUNNER_STATUS_APP_KEY`. Without them every job runs
+hosted. The GTX runner account has passwordless sudo for `/usr/bin/chown`
+only, which is all the workspace reclaim needs; apt packages a gate needs
+must already be installed on the box. What follows is the history that led
+here.
+
 Since the runner default moved to `self-hosted`, every app's CI queues on
 the one org runner, the Mele. Measured on honeycomb on 2026-09-09: pytest
 307s, vitest 375s, tsc 63s, the whole test job 14 minutes, against 35s,
