@@ -179,7 +179,7 @@ on:
           a box that polls faster wins every race. So a short first job asks
           the API which preferred runner is free and hands the rest of the
           run its runs-on: the preferred labels when one is free, `runner`
-          otherwise. Needs RUNNER_STATUS_TOKEN (see the pick job); without it,
+          otherwise. Needs the beesec-runner-status app (see the pick job); without it,
           or with this empty, the run uses `runner` exactly as before.
         type: string
         default: ''
@@ -256,9 +256,12 @@ on:
 jobs:
   # Which runner the rest of the run lands on. See `prefer_runner`. The
   # runners API needs a token that may list runners, which GITHUB_TOKEN
-  # cannot: RUNNER_STATUS_TOKEN is a fine-grained PAT with read on
-  # "Administration" for the repo (or "Self-hosted runners" on the org),
-  # stored as an org secret. Every failure, a missing token, a 403, a
+  # cannot. The token is minted from the beesec-runner-status GitHub App,
+  # which has organization_self_hosted_runners read and nothing else: org
+  # variable RUNNER_STATUS_APP_ID, org secret RUNNER_STATUS_APP_KEY, reaching
+  # here through the caller's `secrets: inherit`. RUNNER_STATUS_TOKEN was
+  # read before but never existed, so every pick got 403. Every failure, a
+  # missing app, a 403, a
   # network blip, falls back to `runner`, so this job can slow a run down
   # by twenty seconds and can never stop one. The status is read at the
   # repo AND the org, because a workstation may be registered at either.
@@ -274,11 +277,19 @@ jobs:
       deploy_api: ${{ steps.scope.outputs.deploy_api }}
       deploy_web: ${{ steps.scope.outputs.deploy_web }}
     steps:
+      - id: status-token
+        if: inputs.prefer_runner != '' && vars.RUNNER_STATUS_APP_ID != ''
+        continue-on-error: true
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.RUNNER_STATUS_APP_ID }}
+          private-key: ${{ secrets.RUNNER_STATUS_APP_KEY }}
+          owner: BeeSec-UK
       - id: pick
         env:
           PREFER: ${{ inputs.prefer_runner }}
           DEFAULT: ${{ inputs.runner }}
-          TOKEN: ${{ secrets.RUNNER_STATUS_TOKEN }}
+          TOKEN: ${{ steps.status-token.outputs.token }}
           REPO: ${{ github.repository }}
           ORG: ${{ github.repository_owner }}
         run: |
@@ -302,7 +313,7 @@ jobs:
               echo "no preferred runner idle; using $DEFAULT"
             fi
           else
-            echo "no preference or no RUNNER_STATUS_TOKEN; using $DEFAULT"
+            echo "no preference or no runner-status token; using $DEFAULT"
           fi
           echo "labels=$choose" >> "$GITHUB_OUTPUT"
 
