@@ -197,9 +197,9 @@ on:
         default: false
 
       runner:
-        description: JSON array of runner labels. Default keeps GitHub-hosted; pass '["self-hosted","linux","x64"]' to run on the org self-hosted runner.
+        description: JSON array of runner labels. The default is the beesec-linux runners, the only ones the org runs since the GitHub spending limit stays at zero (operator, 21 Oct 2026). They carry no self-hosted label, so '["self-hosted","beesec-linux"]' matches nothing.
         type: string
-        default: '["self-hosted","linux","x64"]'
+        default: '["beesec-linux"]'
 
       path_gates:
         description: >-
