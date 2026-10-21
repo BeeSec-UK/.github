@@ -1,0 +1,88 @@
+# Fails a pull request while "What it does" or "Try it on dev" is empty or
+# still holds only the template's comment, or while the Claude test prompt is
+# missing, still has template placeholders, names a host other than dev or
+# GitHub, or holds anything credential-shaped. A reviewer can then pick the
+# change up without asking the author. Review alerts quote both sections and send the
+# nudge back to the author until they are filled
+# (BeeSec-UK/beesec-release docs/review-alerts.md, decision 10).
+#
+# The rule, shared with diapause's review alerts: a section is the text under
+# its "## <name>" heading, case-insensitive, up to the next "## " heading.
+# HTML comments and whitespace are not content.
+#
+# The body is read from the event payload file, never interpolated into the
+# script, so nothing in a PR body runs. A caller is the whole per-repo file:
+#
+#   name: pr-sections
+#   on:
+#     pull_request:
+#       types: [opened, edited, reopened, synchronize, ready_for_review]
+#   permissions: {}
+#   jobs:
+#     sections:
+#       uses: BeeSec-UK/.github/.github/workflows/pr-sections.yml@main
+name: pr-sections
+
+on:
+  workflow_call:
+
+permissions: {}
+
+jobs:
+  sections:
+    runs-on: beesec-linux
+    timeout-minutes: 2
+    if: github.event_name == 'pull_request' && !github.event.pull_request.draft
+    steps:
+      - name: What it does, Try it on dev and the Claude test prompt
+        shell: python3 {0}
+        run: |
+          import json, os, re, sys
+          body = json.load(open(os.environ["GITHUB_EVENT_PATH"]))["pull_request"].get("body") or ""
+          body = re.sub(r"<!--.*?-->", "", body, flags=re.S)
+          def section(name):
+              m = re.search(r"^##[ \t]+" + re.escape(name) + r"[ \t]*$(.*?)(?=^##[ \t]|\Z)", body, re.I | re.M | re.S)
+              return m.group(1).strip() if m else ""
+          errors = [f"'## {n}' is empty. Review alerts go to the author until it is filled in."
+                    for n in ("What it does", "Try it on dev") if not section(n)]
+          m = re.search(r"^```[^\n]*\n(.*?)^```", section("Claude test prompt"), re.M | re.S)
+          prompt = m.group(1).strip() if m else ""
+          placeholders = re.findall(r"<(?:role|PR URL|dev URL|step|result|dev host[^>]*|for example[^>]*|refused[^>]*)>", prompt)
+          if not prompt:
+              errors.append("'## Claude test prompt' has no fenced prompt.")
+          elif placeholders:
+              errors.append(f"The Claude test prompt still has {len(placeholders)} template placeholder(s), such as {placeholders[0]}.")
+          # Only the dev environment and GitHub may be named. A prod host, or a
+          # host whose environment cannot be told, is refused.
+          hosts = set(re.findall(r"https?://([a-z0-9.-]+)", prompt, re.I))
+          hosts |= set(re.findall(r"\b([a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:beesec\.co\.uk|azurewebsites\.net|azurestaticapps\.net|azure-api\.net))\b", prompt, re.I))
+          def dev(h):
+              h = h.lower().rstrip(".")
+              if "prod" in h:
+                  return False
+              if h in ("github.com", "www.github.com"):
+                  return True
+              if h.endswith("-dev.beesec.co.uk") or h.endswith(".dev.beesec.co.uk"):
+                  return True
+              first = h.split(".")[0]
+              return h.endswith(".azurewebsites.net") and (first.endswith("-dev") or "-dev-" in first)
+          bad = sorted(h for h in hosts if not dev(h))
+          if bad:
+              errors.append("The Claude test prompt names a host that is not dev: " + ", ".join(bad) + ". Use the app's -dev.beesec.co.uk host.")
+          secret = [
+              r"(?i)\b(password|passwd|pwd|secret|client[_-]?secret|api[_-]?key|token)\s*[:=]\s*[\"']?[^\s\"']{6,}",
+              r"(?i)\bbearer\s+[a-z0-9._~+/-]{12,}",
+              r"\beyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}",
+              r"\b(ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}|\bgithub_pat_[A-Za-z0-9_]{20,}",
+              r"\bAKIA[0-9A-Z]{16}\b",
+              r"-----BEGIN [A-Z ]*PRIVATE KEY-----",
+              r"(?i)\b(AccountKey|SharedAccessKey|SharedAccessSignature)=",
+              r"(?i)[?&](sig|code)=[A-Za-z0-9%._-]{16,}",
+          ]
+          if any(re.search(x, prompt) for x in secret):
+              errors.append("The Claude test prompt holds something credential-shaped. Remove it: the reviewer signs in themselves.")
+          for e in errors:
+              print(f"::error title=PR description::{e}")
+          if errors:
+              sys.exit(1)
+          print("What it does, Try it on dev and the Claude test prompt are filled in.")
