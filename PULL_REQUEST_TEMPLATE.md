@@ -35,4 +35,6 @@ A Claude run is evidence, not approval. The second person still submits the appr
 
 - [ ] I have requested a reviewer on this page. Review alerts start after 4 working hours. Until both sections above are filled in, and while no reviewer is requested, alerts come to you.
 
+The pr-sections check re-runs by itself when you edit this description. Re-running an old run checks the old text.
+
 Add `review-hold` to park this PR with no alerts, or `review-urgent` to bring the nudge forward to 1 working hour.
