@@ -33,7 +33,7 @@ permissions: {}
 
 jobs:
   sections:
-    runs-on: beesec-linux
+    runs-on: preflight
     timeout-minutes: 2
     if: github.event_name == 'pull_request' && !github.event.pull_request.draft
     steps:
