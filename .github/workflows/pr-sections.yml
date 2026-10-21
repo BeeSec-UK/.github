@@ -1,0 +1,49 @@
+# Fails a pull request while "What it does" or "Try it on dev" is empty or
+# still holds only the template's comment, so a reviewer can pick it up
+# without asking the author. Review alerts quote both sections and send the
+# nudge back to the author until they are filled
+# (BeeSec-UK/beesec-release docs/review-alerts.md, decision 10).
+#
+# The rule, shared with diapause's review alerts: a section is the text under
+# its "## <name>" heading, case-insensitive, up to the next "## " heading.
+# HTML comments and whitespace are not content.
+#
+# The body is read from the event payload file, never interpolated into the
+# script, so nothing in a PR body runs. A caller is the whole per-repo file:
+#
+#   name: pr-sections
+#   on:
+#     pull_request:
+#       types: [opened, edited, reopened, synchronize, ready_for_review]
+#   permissions: {}
+#   jobs:
+#     sections:
+#       uses: BeeSec-UK/.github/.github/workflows/pr-sections.yml@main
+name: pr-sections
+
+on:
+  workflow_call:
+
+permissions: {}
+
+jobs:
+  sections:
+    runs-on: beesec-linux
+    timeout-minutes: 2
+    if: github.event_name == 'pull_request' && !github.event.pull_request.draft
+    steps:
+      - name: What it does and Try it on dev are filled in
+        shell: python3 {0}
+        run: |
+          import json, os, re, sys
+          body = json.load(open(os.environ["GITHUB_EVENT_PATH"]))["pull_request"].get("body") or ""
+          body = re.sub(r"<!--.*?-->", "", body, flags=re.S)
+          def section(name):
+              m = re.search(r"^##[ \t]+" + re.escape(name) + r"[ \t]*$(.*?)(?=^##[ \t]|\Z)", body, re.I | re.M | re.S)
+              return m.group(1).strip() if m else ""
+          missing = [n for n in ("What it does", "Try it on dev") if not section(n)]
+          if missing:
+              for n in missing:
+                  print(f"::error title=PR description::'## {n}' is empty. Review alerts go to the author until it is filled in.")
+              sys.exit(1)
+          print("Both sections are filled in.")
