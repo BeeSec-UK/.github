@@ -11,7 +11,10 @@
 # HTML comments and whitespace are not content.
 #
 # The body is read from the event payload file, never interpolated into the
-# script, so nothing in a PR body runs. A caller is the whole per-repo file:
+# script, so nothing in a PR body runs. That is why a re-run of this check
+# sees the description as it was when the run was first triggered. To check
+# a fixed description, edit it: the caller triggers on `edited`, so the edit
+# starts a fresh run. Do not re-run the old one. A caller is the whole per-repo file:
 #
 #   name: pr-sections
 #   on:
