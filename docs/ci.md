@@ -104,6 +104,10 @@ moment anything is unreadable:
   the web half. A change touching only one half runs only that half's
   tests and deploys only that half; a change touching neither (docs,
   README, scripts, the capability map) runs no tests and deploys nothing.
+  A change under `infra/` runs the API half of the gate, pytest and
+  `extra_gate_script`, so Bicep template tests run on an infra-only
+  change, but it redeploys nothing. The caller's own pipeline file is
+  already in the API half through `.github/`.
   The secret scan still runs on every push, in `pick` when the gate is
   skipped. An empty diff, an error body or a diff over the API's 300-file
   cap all mean everything. Needs only `contents: read`.
