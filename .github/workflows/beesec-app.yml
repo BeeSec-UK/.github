@@ -208,7 +208,8 @@ on:
           compare API: `api/`, `docs/templates/` and `.github/` are the API
           half, `web/` and `.github/` the web half, and a change outside
           both (docs, README, scripts, the capability map) runs no tests and
-          deploys nothing. Any failure to read the diff runs everything. The
+          deploys nothing. `infra/` runs the API half of the gate, so the
+          template tests run, but deploys nothing. Any failure to read the diff runs everything. The
           secret scan still runs on every push, in the pick job when the
           gate is skipped. Opt-in per caller; needs only `contents: read`.
         type: boolean
@@ -343,7 +344,7 @@ jobs:
           PR_HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
           set -u
-          api=true; web=true; swa=true; reason="everything: gates off"
+          api=true; web=true; swa=true; infra=false; reason="everything: gates off"
           gh_api() { curl -sS --max-time 20 -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" "https://api.github.com/$1"; }
 
           if [ "$PATH_GATES" = "true" ]; then
@@ -374,8 +375,16 @@ jobs:
                   case "$f" in
                     web/*|.github/*) web=true ;;
                   esac
+                  # infra/ runs the API half of the gate, so the template
+                  # tests in pytest or extra_gate_script run on an
+                  # infra-only change, but it does not redeploy the
+                  # Function App. The caller's pipeline file is already in
+                  # the API half through .github/.
+                  case "$f" in
+                    infra/*) infra=true ;;
+                  esac
                 done <<< "$files"
-                reason="changed: api=$api web=$web ($(printf '%s\n' "$files" | grep -c .) files)"
+                reason="changed: api=$api web=$web infra=$infra ($(printf '%s\n' "$files" | grep -c .) files)"
               else
                 reason="everything: could not read the diff for $range"
               fi
@@ -411,10 +420,12 @@ jobs:
               reason="$reason; no merged PR found for $SHA, testing"
             fi
           fi
-          if [ "$api" != "true" ] && [ "$web" != "true" ]; then tests=false; fi
+          api_gate=$api
+          [ "$infra" = "true" ] && api_gate=true
+          if [ "$api_gate" != "true" ] && [ "$web" != "true" ]; then tests=false; fi
 
           echo "$reason"
-          echo "api=$api" >> "$GITHUB_OUTPUT"
+          echo "api=$api_gate" >> "$GITHUB_OUTPUT"
           echo "web=$web" >> "$GITHUB_OUTPUT"
           echo "tests=$tests" >> "$GITHUB_OUTPUT"
           echo "deploy_api=$api" >> "$GITHUB_OUTPUT"
