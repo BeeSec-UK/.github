@@ -281,11 +281,15 @@ jobs:
       - id: status-token
         if: inputs.prefer_runner != '' && vars.RUNNER_STATUS_APP_ID != ''
         continue-on-error: true
-        uses: actions/create-github-app-token@v1
+        # Pinned to a commit, as beesec-release pins it: this step holds the
+        # org App key on whatever runner the caller chose. The token asks for
+        # runner read only, so it stays there if the App gains permissions.
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           app-id: ${{ vars.RUNNER_STATUS_APP_ID }}
           private-key: ${{ secrets.RUNNER_STATUS_APP_KEY }}
           owner: BeeSec-UK
+          permission-organization-self-hosted-runners: read
       - id: pick
         env:
           PREFER: ${{ inputs.prefer_runner }}
