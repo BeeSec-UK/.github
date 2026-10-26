@@ -862,25 +862,30 @@ jobs:
         working-directory: ${{ inputs.app_location }}
         run: ${{ inputs.app_build_command }}
 
-      - name: Deploy SWA
-        uses: Azure/static-web-apps-deploy@v1
-        with:
-          azure_static_web_apps_api_token: ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN }}
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
-          action: upload
-          # With skip_app_build the action uploads app_location VERBATIM and
-          # ignores output_location, so the built path must be composed here.
-          # Getting this wrong ships the source tree and the browser is served a
-          # raw .tsx as application/octet-stream -- a blank page, from a green run.
-          app_location: ${{ inputs.app_build_command != '' && format('{0}/{1}', inputs.app_location, inputs.output_location) || inputs.app_location }}
-          api_location: ""
-          output_location: ""
-          skip_app_build: ${{ inputs.app_build_command != '' }}
+      # The SWA CLI, not Azure/static-web-apps-deploy, which is a Docker
+      # container action and fails on runners whose user is not in the docker
+      # group (factory#50). swa-deploy builds nothing, so the Oryx build an
+      # empty app_build_command used to fall back on is gone: the bundle is
+      # built on the runner above, or the deploy is refused here.
+      - name: Refuse a deploy with no runner build
+        if: inputs.app_build_command == ''
+        run: |
+          echo "app_build_command is empty. The SWA deploy no longer builds in Docker, so set app_build_command and output_location."
+          exit 1
 
-      # The cause of the root-owned workspace, handled at the source. The step
-      # above runs as root inside a container with the workspace mounted, and
-      # what it writes stays root-owned on a self-hosted runner after the job
-      # ends, poisoning the next checkout to land there (propolis#77). Hand
+      - name: Deploy SWA
+        uses: BeeSec-UK/beesec-factory/.github/actions/swa-deploy@app-stack-v1.11.1
+        with:
+          token: ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN }}
+          # swa-deploy uploads app-location verbatim, so the built path is
+          # composed here. Getting this wrong ships the source tree and the
+          # browser is served a raw .tsx -- a blank page, from a green run.
+          app-location: ${{ format('{0}/{1}', inputs.app_location, inputs.output_location) }}
+          node-version: ${{ inputs.node_version }}
+
+      # The Docker deploy this replaced ran as root and left root-owned files
+      # on a self-hosted runner, poisoning the next checkout (propolis#77).
+      # swa-deploy writes none, so this only reclaims an old workspace. Hand
       # the workspace back to the runner account before leaving, whether the
       # deploy succeeded or not: `always()` so a failed deploy still cleans
       # up, and swallowed so a runner without sudo, or a GitHub-hosted one
