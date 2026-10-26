@@ -874,7 +874,7 @@ jobs:
           exit 1
 
       - name: Deploy SWA
-        uses: BeeSec-UK/beesec-factory/.github/actions/swa-deploy@app-stack-v1.11.1
+        uses: BeeSec-UK/beesec-factory/.github/actions/swa-deploy@app-stack-v1.12.1
         with:
           token: ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN }}
           # swa-deploy uploads app-location verbatim, so the built path is
