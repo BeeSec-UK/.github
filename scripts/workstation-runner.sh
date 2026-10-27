@@ -17,7 +17,7 @@
 #
 # Nothing here needs sudo. The service install does, and is printed rather
 # than run because it is the one step that outlives this shell. The runner
-# needs docker, the Azure CLI and the app's apt packages present, because
+# needs docker, the Azure CLI, zip and the app's apt packages present, because
 # deploy jobs land on it too; the pipeline's apt step only runs when a
 # package is missing, so a machine without passwordless sudo is fine once
 # it has them. See docs/ci.md for why this exists and what it saves.
@@ -37,6 +37,7 @@ done
 command -v gh >/dev/null || { echo "gh is required and must be logged in" >&2; exit 1; }
 command -v docker >/dev/null || echo "warning: docker not found; the SWA deploy job cannot run here" >&2
 command -v az >/dev/null || echo "warning: az not found; the Function App deploy cannot run here" >&2
+command -v zip >/dev/null || echo "warning: zip not found; the app-stack plan job cannot run here" >&2
 
 version="$(gh api repos/actions/runner/releases/latest -q .tag_name | sed 's/^v//')"
 distro="$(. /etc/os-release && echo "${ID:-}")"
