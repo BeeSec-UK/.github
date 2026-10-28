@@ -33,9 +33,15 @@ duplicate runs on rapid pushes, and PR preview deploys nobody used.
 Shell/tool repos (forager, claude-project-setup, pawdit …) keep their own
 workflows but follow the same rules — rule 1 is usually the whole saving.
 
-## Runners, and why a run takes fourteen minutes
+## Runners, and why a run took fourteen minutes
 
-Since the runner default moved to `self-hosted`, every app's CI queues on
+The runner pools today are `beesec-dev` on the GTX, `beesec-prod` on
+drone2 for `beesec-release` only, and `beesec-preflight` on the Pi, listed
+in the [README](../README.md#runners). The pipeline's default is
+`["beesec-dev"]`, and the Mele and the `self-hosted` labels below are no
+longer what any caller asks for. This section is kept for the measurements.
+
+In September 2026, when the runner default moved to `self-hosted`, every app's CI queued on
 the one org runner, the Mele. Measured on honeycomb on 2026-09-09: pytest
 307s, vitest 375s, tsc 63s, the whole test job 14 minutes, against 35s,
 90s and 10s for the same steps on a developer laptop. One runner also
