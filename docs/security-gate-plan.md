@@ -1,6 +1,6 @@
 # Plan: automated security on every PR in beesec-app.yml
 
-Status: proposed, 29 October 2026. Docs only. Building it is a workflow change and needs the operator as maintainer.
+Status: decided, 29 October 2026. The operator answered the four decisions at the end on 29 October. Building it is a workflow change and needs the operator as maintainer.
 
 This is step 1 of the review loop in orchestrator `standards/engineering-workflow.md` for step 4 of that loop. Every PR runs secret scanning, dependency and licence checks, static analysis, the IaC policy check and the client-data scrub with no person involved, and any finding fails the PR.
 
@@ -65,7 +65,7 @@ Times are estimates for one PR run on a GTX runner and are measured in step 1 of
   - The callers then delete their own `plan` jobs, which removes a sub-two-minute job from three repositories.
 - **Cost:** 12 to 35 s, moved rather than added. A separate job's checkout and set-up are saved, so the net cost is lower than today.
 - **False positives:** stay where they are, in the factory's conform rules and PSRule baseline, changed by a factory PR.
-- **Open question A:** `uses:` cannot take a version from an input, so `beesec-app.yml` pins one factory version for every caller. Callers are on v1.8.3 to v1.12.3 today. Either the gate pins the newest, v1.12.3, and the three callers move with it, or the step stays in the callers and only the cost rule is waived.
+- **Pin, decision A:** `uses:` cannot take a version from an input, so `beesec-app.yml` pins one factory version for every caller, app-stack-v1.12.3. Callers are on v1.8.3 to v1.12.3 today and move with it.
 
 ### 5. Client-data scrub: new
 
@@ -74,7 +74,7 @@ Times are estimates for one PR run on a GTX runner and are measured in step 1 of
 - **Where:** gate, and the `pick` fallback, because a docs-only change is where pasted client data hides.
 - **Cost:** under 2 s. It is a `git diff` of the PR and a fixed-string grep.
 - **False positives:** there is no inline override, because client data has no legitimate place in an app repository. A false match is fixed by changing the pattern list, which the operator owns. Fixtures use neutral, made-up engagement references.
-- **Open question B:** where the client list comes from, and who keeps the secret current. The options are a hand-kept list of client names and domains, or one exported from honeycomb's client records and refreshed by a scheduled job in a private repository.
+- **Source, decision B:** the list is the org secret above, which the operator owns and keeps current.
 
 ## Total cost
 
@@ -94,9 +94,11 @@ Each step is its own PR in this repository, with the operator as maintainer. Ste
 - **Repositories that do not call `beesec-app.yml`:** queen, claude-skills, forager, beeline, swarm, nasonov and the rest get only `pr-sections`. Bringing them under the same checks is a separate plan.
 - **Push runs on `main`:** these are not re-scanned beyond today's gitleaks step, because `trust_pr_gate` already proves the tree passed on its PR.
 
-## Decisions for the operator
+## Decisions
 
-- A: the factory pin for the folded IaC check.
-- B: the client pattern list's source and owner.
-- C: whether a week in shadow mode comes before enforcement. I lean yes, because enforcing at once on nine repositories with unknown dependency findings would block every open PR the same day.
-- D: whether an unreachable vulnerability database fails the run. I lean yes, to match gitleaks.
+The operator answered all four on 29 October 2026.
+
+- A, the factory pin: `beesec-app.yml` pins the factory `plan` action at app-stack-v1.12.3 for every caller. The three IaC callers move to it when their own `plan` jobs are deleted.
+- B, the client pattern list: an org secret, `CLIENT_SCRUB_PATTERNS`, owned by the operator. The step reports file and line only, never the matched text.
+- C, shadow mode: yes. A week with every new step reporting and nothing failing, before enforcement.
+- D, an unreachable vulnerability database: the run fails, the same rule as gitleaks.
