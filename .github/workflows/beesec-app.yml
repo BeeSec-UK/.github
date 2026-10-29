@@ -261,8 +261,10 @@ on:
           The caller's dev .bicepparam, e.g. infra/dev.bicepparam. Set, and
           with security_checks on, a PR that touches infra/ runs the factory
           plan action on it in the gate: the app-stack plan and the hub's
-          baseline rules, offline, with no Azure sign-in. It replaces a
-          caller's own plan job. Empty runs nothing.
+          baseline rules, offline, with no Azure sign-in. It plans at the
+          factory version the caller's deploy-app.yml is pinned to, or
+          app-stack-v1.12.3 where there is none. It replaces a caller's own
+          plan job. Empty runs nothing.
         type: string
         default: ''
 
@@ -863,15 +865,102 @@ jobs:
           echo "client-data scrub: no private-shaped path and no client named, $(wc -l < "$list") pattern(s)"
 
       # IaC policy, check 4 of docs/security-gate-plan.md: the factory plan
-      # action, folded in from the callers' own plan jobs. One factory
-      # version for every caller, because `uses:` cannot take one from an
-      # input: app-stack-v1.12.3 (decision A), pinned by commit. Only on a
-      # PR that touches infra/, or on any PR when the path gates are off.
-      # Off unless security_checks and iac_params_file, and shadow until
-      # security_enforce.
-      - name: IaC policy (factory plan)
-        id: iac
+      # action, folded in from the callers' own plan jobs. Each caller is
+      # planned at the factory version it deploys, read from its
+      # deploy-app.yml pin, because a plan against a newer app-stack than
+      # the one deployed reports drift that is not there. `uses:` cannot
+      # take a version from an expression, so each supported version has its
+      # own step, pinned by commit, and only the one that matches runs. A
+      # caller with no deploy-app.yml pin is planned at app-stack-v1.12.3
+      # (decision A). Only on a PR that touches infra/, or on any PR when
+      # the path gates are off. Off unless security_checks and
+      # iac_params_file, and shadow until security_enforce.
+      - name: IaC policy, the factory version the caller deploys
+        id: iac_version
         if: inputs.security_checks && inputs.iac_params_file != '' && github.event_name == 'pull_request' && needs.pick.outputs.infra == 'true'
+        continue-on-error: ${{ !inputs.security_enforce }}
+        run: |
+          set -euo pipefail
+          # The factory versions there is a plan step for below, with the commit
+          # each tag points at. A version a caller moves to gets its own step here.
+          KNOWN="app-stack-v1.8.3=34553a903f9e38660720e2468d46f265e9db1f23
+          app-stack-v1.8.4=826215084c92be84a3e4ccc843d0464a67cda943
+          app-stack-v1.10.1=f23c87d7bddc5be3e47329241298801cbc14937e
+          app-stack-v1.12.3=28b74eb34426471f4450d41f60247a37a9a00e6c"
+          DEFAULT=app-stack-v1.12.3
+          shopt -s nullglob
+          wfs=(.github/workflows/*.yml .github/workflows/*.yaml)
+          found=()
+          while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            ref=$(sed -nE 's#.*beesec-factory/\.github/workflows/deploy-app\.yml@([^[:space:]]+).*#\1#p' <<< "$line")
+            note=$(grep -oE '#[[:space:]]*app-stack-v[0-9]+\.[0-9]+\.[0-9]+' <<< "$line" | grep -oE 'app-stack-v[0-9.]+' || true)
+            tag=""
+            if [[ $ref =~ ^app-stack-v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              tag=$ref
+            elif [[ $ref =~ ^[0-9a-f]{40}$ ]]; then
+              while IFS='=' read -r t c; do [ "$c" = "$ref" ] && tag=$t; done <<< "$KNOWN"
+              if [ -z "$tag" ]; then
+                echo "::error::deploy-app.yml is pinned to commit $ref, which is not a factory version this pipeline has a plan step for"
+                exit 1
+              fi
+              if [ -n "$note" ] && [ "$note" != "$tag" ]; then
+                echo "::error::deploy-app.yml is pinned to $ref, which is $tag, but its comment says $note"
+                exit 1
+              fi
+            else
+              echo "::error::deploy-app.yml is pinned to '$ref', not to an app-stack tag or a commit, so its version is unknown"
+              exit 1
+            fi
+            found+=("$tag")
+          done < <([ "${#wfs[@]}" = 0 ] || grep -hE 'beesec-factory/\.github/workflows/deploy-app\.yml@' -- "${wfs[@]}" || true)
+
+          mapfile -t versions < <(printf '%s\n' "${found[@]+"${found[@]}"}" | grep . | sort -u || true)
+          if [ "${#versions[@]}" -gt 1 ]; then
+            echo "::error::the caller deploys more than one factory version (${versions[*]}), so there is no one version to plan at"
+            exit 1
+          elif [ "${#versions[@]}" = 0 ]; then
+            tag=$DEFAULT; why="the default, as the caller pins no deploy-app.yml"
+            echo "::notice::no deploy-app.yml pin in the caller's workflows, so the plan uses $DEFAULT"
+          else
+            tag=${versions[0]}; why="the factory version the caller deploys"
+          fi
+          if ! grep -q "^$tag=" <<< "$KNOWN"; then
+            echo "::error::the caller deploys $tag, and this pipeline has no plan step for it. Add one to beesec-app.yml, pinned by commit."
+            exit 1
+          fi
+          echo "planning at $tag, $why"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: IaC policy (factory plan, app-stack-v1.8.3)
+        if: steps.iac_version.outputs.tag == 'app-stack-v1.8.3'
+        continue-on-error: ${{ !inputs.security_enforce }}
+        uses: BeeSec-UK/beesec-factory/.github/actions/plan@34553a903f9e38660720e2468d46f265e9db1f23 # app-stack-v1.8.3
+        with:
+          params-file: ${{ inputs.iac_params_file }}
+          subscription-name: ${{ inputs.iac_subscription_name }}
+          subscription-id: ${{ inputs.iac_subscription_id || '00000000-0000-0000-0000-000000000000' }}
+
+      - name: IaC policy (factory plan, app-stack-v1.8.4)
+        if: steps.iac_version.outputs.tag == 'app-stack-v1.8.4'
+        continue-on-error: ${{ !inputs.security_enforce }}
+        uses: BeeSec-UK/beesec-factory/.github/actions/plan@826215084c92be84a3e4ccc843d0464a67cda943 # app-stack-v1.8.4
+        with:
+          params-file: ${{ inputs.iac_params_file }}
+          subscription-name: ${{ inputs.iac_subscription_name }}
+          subscription-id: ${{ inputs.iac_subscription_id || '00000000-0000-0000-0000-000000000000' }}
+
+      - name: IaC policy (factory plan, app-stack-v1.10.1)
+        if: steps.iac_version.outputs.tag == 'app-stack-v1.10.1'
+        continue-on-error: ${{ !inputs.security_enforce }}
+        uses: BeeSec-UK/beesec-factory/.github/actions/plan@f23c87d7bddc5be3e47329241298801cbc14937e # app-stack-v1.10.1
+        with:
+          params-file: ${{ inputs.iac_params_file }}
+          subscription-name: ${{ inputs.iac_subscription_name }}
+          subscription-id: ${{ inputs.iac_subscription_id || '00000000-0000-0000-0000-000000000000' }}
+
+      - name: IaC policy (factory plan, app-stack-v1.12.3)
+        if: steps.iac_version.outputs.tag == 'app-stack-v1.12.3'
         continue-on-error: ${{ !inputs.security_enforce }}
         uses: BeeSec-UK/beesec-factory/.github/actions/plan@28b74eb34426471f4450d41f60247a37a9a00e6c # app-stack-v1.12.3
         with:
