@@ -239,6 +239,22 @@ on:
         type: string
         default: ''
 
+      security_checks:
+        description: >-
+          Run the security checks of docs/security-gate-plan.md as steps in
+          the gate, or in pick when the gate is skipped: today the
+          client-data scrub. Off by default while their cost is measured.
+        type: boolean
+        default: false
+
+      security_enforce:
+        description: >-
+          Let a security check fail the run. Off, each check reports its
+          findings as annotations and the run carries on, for the week in
+          shadow before enforcement. Has no effect without security_checks.
+        type: boolean
+        default: false
+
     outputs:
       # For a caller that keeps its own deploy jobs (propolis, apiary): the
       # pick job's verdict, so `needs.pipeline.outputs.deploy_api == 'true'`
@@ -510,6 +526,97 @@ jobs:
           grep -q '\[' /tmp/gitleaks.toml || { echo "::error::gitleaks config download was not a TOML file"; exit 1; }
           "$GL" dir . -c /tmp/gitleaks.toml --no-banner --redact --exit-code 1
 
+      # Client-data scrub, check 5 of docs/security-gate-plan.md. Fails on a
+      # path `beesec pr` would refuse, and on a line naming a client from the
+      # org secret CLIENT_SCRUB_PATTERNS, which this public repository cannot
+      # hold. On a PR it reads only what the PR adds; elsewhere the whole
+      # tree. It prints file and line, never the text. Off unless the caller
+      # sets security_checks, and reports without failing until
+      # security_enforce (the week in shadow, decision C).
+      - name: Client-data scrub
+        id: scrub
+        if: inputs.security_checks && steps.scope.outputs.tests != 'true'
+        continue-on-error: ${{ !inputs.security_enforce }}
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          PATTERNS: ${{ secrets.CLIENT_SCRUB_PATTERNS }}
+        run: |
+          set -euo pipefail
+          # The path shape `beesec pr` refuses, copied verbatim from
+          # claude-project-setup bin/beesec, and tests/scrub.test.sh fails if the
+          # two drift apart.
+          PRIVATE_SHAPED='_private/|findings-brain\.json|\.pem$|\.key$|id_rsa|secrets\.md'
+          list=$(mktemp); trap 'rm -f "$list"' EXIT
+          # One fixed string per line. CR and surrounding blanks are stripped, and a
+          # blank line is dropped, because an empty fixed string matches every line.
+          printf '%s\n' "${PATTERNS:-}" | tr -d '\r' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -v '^$' > "$list" || true
+          if [ ! -s "$list" ]; then
+            echo "::error::CLIENT_SCRUB_PATTERNS is not set, so the scrub has nothing to look for. Is the caller passing secrets: inherit?"
+            exit 1
+          fi
+          git() { command git -c core.quotePath=false "$@"; }
+          hits=0
+
+          if [ "$EVENT" = pull_request ]; then
+            case "${BASE:-}" in
+              *[!0-9a-f]*|"") echo "::error::no usable PR base in the event"; exit 1 ;;
+            esac
+            [ "${#BASE}" = 40 ] || { echo "::error::no usable PR base in the event"; exit 1; }
+            git fetch -q --no-tags --depth=1 origin "$BASE" || { echo "::error::could not fetch the PR base $BASE"; exit 1; }
+            paths=$(git diff --name-only --no-renames --diff-filter=d "$BASE" HEAD)
+          else
+            paths=$(git ls-files)
+          fi
+
+          while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            echo "::error file=$f::private-shaped path in the change: $f"
+            hits=$((hits + 1))
+          done < <(printf '%s\n' "$paths" | grep -E "$PRIVATE_SHAPED" || true)
+
+          # Content. Only file and line number are ever printed, never the line or
+          # the pattern, so a hit does not copy client data into the log.
+          if [ "$EVENT" = pull_request ]; then
+            # The lines the PR adds. The hunk header gives each added line's number
+            # in the new file, and the counts say where a hunk ends, so an added
+            # line that itself starts with "++" is not taken for a file header.
+            found=$(git diff -U0 --no-renames --no-color --no-ext-diff "$BASE" HEAD | awk '
+              FNR == NR { p[++n] = tolower($0); next }
+              remold > 0 || remnew > 0 {
+                c = substr($0, 1, 1)
+                if (c == "+") {
+                  l = tolower(substr($0, 2))
+                  for (i = 1; i <= n; i++) if (index(l, p[i])) { print file ":" ln; break }
+                  ln++; remnew--
+                } else if (c == "-") remold--
+                else if (c == " ") { ln++; remold--; remnew-- }
+                next
+              }
+              /^\+\+\+ / { file = substr($0, 5); sub(/\t$/, "", file); sub(/^b\//, "", file); next }
+              /^@@ / {
+                split($2, o, ","); split($3, nw, ",")
+                remold = (2 in o) ? o[2] + 0 : 1
+                remnew = (2 in nw) ? nw[2] + 0 : 1
+                ln = substr(nw[1], 2) + 0
+              }' "$list" -)
+          else
+            found=$({ git grep -I -n -i -F -f "$list" -z -- . || true; } | while IFS= read -r -d '' f && IFS= read -r -d '' n && IFS= read -r _; do
+              printf '%s:%s\n' "$f" "$n"
+            done)
+          fi
+          while IFS= read -r at; do
+            [ -n "$at" ] || continue
+            echo "::error file=${at%:*},line=${at##*:}::a line names a client from CLIENT_SCRUB_PATTERNS: $at"
+            hits=$((hits + 1))
+          done <<< "$found"
+
+          if [ "$hits" -gt 0 ]; then
+            echo "::error::client-data scrub: $hits hit(s). Client data has no place in an app repository, so there is no inline override. A false match is fixed in the pattern list, which the operator owns."
+            exit 1
+          fi
+          echo "client-data scrub: no private-shaped path and no client named, $(wc -l < "$list") pattern(s)"
+
   gate:
     name: Tests (pytest + web gate)
     needs: pick
@@ -639,6 +746,97 @@ jobs:
       # packages between runs, so on every run after the first this was an
       # apt-get update for nothing, and on a workstation runner without
       # passwordless sudo it was the one step that could not run at all.
+      # Client-data scrub, check 5 of docs/security-gate-plan.md. Fails on a
+      # path `beesec pr` would refuse, and on a line naming a client from the
+      # org secret CLIENT_SCRUB_PATTERNS, which this public repository cannot
+      # hold. On a PR it reads only what the PR adds; elsewhere the whole
+      # tree. It prints file and line, never the text. Off unless the caller
+      # sets security_checks, and reports without failing until
+      # security_enforce (the week in shadow, decision C).
+      - name: Client-data scrub
+        id: scrub
+        if: inputs.security_checks
+        continue-on-error: ${{ !inputs.security_enforce }}
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          PATTERNS: ${{ secrets.CLIENT_SCRUB_PATTERNS }}
+        run: |
+          set -euo pipefail
+          # The path shape `beesec pr` refuses, copied verbatim from
+          # claude-project-setup bin/beesec, and tests/scrub.test.sh fails if the
+          # two drift apart.
+          PRIVATE_SHAPED='_private/|findings-brain\.json|\.pem$|\.key$|id_rsa|secrets\.md'
+          list=$(mktemp); trap 'rm -f "$list"' EXIT
+          # One fixed string per line. CR and surrounding blanks are stripped, and a
+          # blank line is dropped, because an empty fixed string matches every line.
+          printf '%s\n' "${PATTERNS:-}" | tr -d '\r' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -v '^$' > "$list" || true
+          if [ ! -s "$list" ]; then
+            echo "::error::CLIENT_SCRUB_PATTERNS is not set, so the scrub has nothing to look for. Is the caller passing secrets: inherit?"
+            exit 1
+          fi
+          git() { command git -c core.quotePath=false "$@"; }
+          hits=0
+
+          if [ "$EVENT" = pull_request ]; then
+            case "${BASE:-}" in
+              *[!0-9a-f]*|"") echo "::error::no usable PR base in the event"; exit 1 ;;
+            esac
+            [ "${#BASE}" = 40 ] || { echo "::error::no usable PR base in the event"; exit 1; }
+            git fetch -q --no-tags --depth=1 origin "$BASE" || { echo "::error::could not fetch the PR base $BASE"; exit 1; }
+            paths=$(git diff --name-only --no-renames --diff-filter=d "$BASE" HEAD)
+          else
+            paths=$(git ls-files)
+          fi
+
+          while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            echo "::error file=$f::private-shaped path in the change: $f"
+            hits=$((hits + 1))
+          done < <(printf '%s\n' "$paths" | grep -E "$PRIVATE_SHAPED" || true)
+
+          # Content. Only file and line number are ever printed, never the line or
+          # the pattern, so a hit does not copy client data into the log.
+          if [ "$EVENT" = pull_request ]; then
+            # The lines the PR adds. The hunk header gives each added line's number
+            # in the new file, and the counts say where a hunk ends, so an added
+            # line that itself starts with "++" is not taken for a file header.
+            found=$(git diff -U0 --no-renames --no-color --no-ext-diff "$BASE" HEAD | awk '
+              FNR == NR { p[++n] = tolower($0); next }
+              remold > 0 || remnew > 0 {
+                c = substr($0, 1, 1)
+                if (c == "+") {
+                  l = tolower(substr($0, 2))
+                  for (i = 1; i <= n; i++) if (index(l, p[i])) { print file ":" ln; break }
+                  ln++; remnew--
+                } else if (c == "-") remold--
+                else if (c == " ") { ln++; remold--; remnew-- }
+                next
+              }
+              /^\+\+\+ / { file = substr($0, 5); sub(/\t$/, "", file); sub(/^b\//, "", file); next }
+              /^@@ / {
+                split($2, o, ","); split($3, nw, ",")
+                remold = (2 in o) ? o[2] + 0 : 1
+                remnew = (2 in nw) ? nw[2] + 0 : 1
+                ln = substr(nw[1], 2) + 0
+              }' "$list" -)
+          else
+            found=$({ git grep -I -n -i -F -f "$list" -z -- . || true; } | while IFS= read -r -d '' f && IFS= read -r -d '' n && IFS= read -r _; do
+              printf '%s:%s\n' "$f" "$n"
+            done)
+          fi
+          while IFS= read -r at; do
+            [ -n "$at" ] || continue
+            echo "::error file=${at%:*},line=${at##*:}::a line names a client from CLIENT_SCRUB_PATTERNS: $at"
+            hits=$((hits + 1))
+          done <<< "$found"
+
+          if [ "$hits" -gt 0 ]; then
+            echo "::error::client-data scrub: $hits hit(s). Client data has no place in an app repository, so there is no inline override. A false match is fixed in the pattern list, which the operator owns."
+            exit 1
+          fi
+          echo "client-data scrub: no private-shaped path and no client named, $(wc -l < "$list") pattern(s)"
+
       - name: Install system packages
         if: inputs.apt_packages != '' && (needs.pick.outputs.api == 'true' || inputs.extra_gate_script != '')
         run: |
