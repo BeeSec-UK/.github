@@ -130,6 +130,15 @@ mkrepo baseold; git -C "$R.origin" switch -q main; printf 'old = FAKESECRET\n' >
 BASE=$(git -C "$R.origin" rev-parse HEAD); git -C "$R.origin" switch -q -C pr; pr_commit "z = 3"; checkout
 run "a secret already on the base, outside the PR, does not fail the PR" 0
 
+# main moves on after the PR branches, so the commit the PR starts from is
+# not the base. It sits at the shallow edge and must not read as adding its
+# whole tree, which holds an old secret.
+mkrepo moved; git -C "$R.origin" switch -q main; printf 'old = FAKESECRET\n' >> "$R.origin/app.py"; git -C "$R.origin" commit -qam "old secret on main"
+git -C "$R.origin" switch -q -C pr; pr_commit "z = 3"; git -C "$R.origin" switch -q main
+printf 'later\n' > "$R.origin/other.py"; git -C "$R.origin" add -A; git -C "$R.origin" commit -qm "main moves on"
+BASE=$(git -C "$R.origin" rev-parse HEAD); git -C "$R.origin" switch -q pr; checkout; N=1
+run "a PR behind a moved base scans only its own commits" 0
+
 mkrepo badcount; pr_commit "x = 1"; checkout
 run "a non-numeric commit count fails" 1 "1; rm -rf /"
 run "a zero commit count fails" 1 "0"
@@ -140,6 +149,20 @@ run "a malformed base fails" 1
 mkrepo nobin; pr_commit "x = 1"; checkout
 out=$(cd "$R" && RUNNER_TOOL_CACHE="$T/empty" GL_ARGS="$T/args" EVENT=pull_request BASE="$BASE" PR_HEAD="$HEADSHA" COMMITS="$N" bash "$T/step.sh" 2>&1); rc=$?
 [ "$rc" != 0 ] && pass "a missing gitleaks binary fails" || fail "a missing gitleaks binary fails" "rc=$rc"
+
+# gitleaks 8.28.0 exits 0 when git errors under it, having scanned nothing.
+# Its real log lines, colour codes and all, must still fail the step.
+for mode in error none; do
+  cp "$STUB" "$STUB.ok"
+  if [ "$mode" = error ]; then
+    printf '#!/bin/sh\n[ "$1" = version ] && exit 0\nprintf "\\033[90m12:53PM\\033[0m \\033[31mERR\\033[0m \\033[36merror=\\033[0m\\"stderr is not empty\\"\\n\\033[90m12:53PM\\033[0m \\033[32mINF\\033[0m \\033[1m0 commits scanned.\\033[0m\\n" >&2\n' > "$STUB"
+  else
+    printf '#!/bin/sh\n[ "$1" = version ] && exit 0\nprintf "\\033[90m12:53PM\\033[0m \\033[32mINF\\033[0m \\033[1m0 commits scanned.\\033[0m\\nno leaks found\\n" >&2\n' > "$STUB"
+  fi
+  mkrepo "open$mode"; pr_commit "x = 1"; checkout
+  run "gitleaks exiting 0 after $( [ "$mode" = error ] && echo "a git error" || echo "scanning no commit" ) fails" 1
+  mv "$STUB.ok" "$STUB"
+done
 
 if command -v gitleaks-real >/dev/null; then
   cp "$(command -v gitleaks-real)" "$STUB"
