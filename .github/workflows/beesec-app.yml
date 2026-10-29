@@ -243,7 +243,8 @@ on:
         description: >-
           Run the security checks of docs/security-gate-plan.md as steps in
           the gate, or in pick when the gate is skipped: today the
-          client-data scrub. Off by default while their cost is measured.
+          client-data scrub and the gitleaks scan of a PR's
+          commits. Off by default while their cost is measured.
         type: boolean
         default: false
 
@@ -526,6 +527,60 @@ jobs:
           grep -q '\[' /tmp/gitleaks.toml || { echo "::error::gitleaks config download was not a TOML file"; exit 1; }
           "$GL" dir . -c /tmp/gitleaks.toml --no-banner --redact --exit-code 1
 
+      # Secret scan of the PR's own commits, check 1 of
+      # docs/security-gate-plan.md. The dir scan above sees only the final
+      # tree, so a secret committed and then deleted inside the PR passes
+      # it, though the secret is in the history for good. This scans each
+      # of the PR's commits. Off unless security_checks, and shadow until
+      # security_enforce.
+      - name: Secret scan of the PR's commits (gitleaks)
+        id: gitleaks_pr
+        if: inputs.security_checks && github.event_name == 'pull_request' && steps.scope.outputs.tests != 'true'
+        continue-on-error: ${{ !inputs.security_enforce }}
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          COMMITS: ${{ github.event.pull_request.commits }}
+        run: |
+          set -euo pipefail
+          VER=8.28.0
+          # The dir scan just before this step fetched the binary into the tool
+          # cache and the estate config to /tmp/gitleaks.toml. Both are reused.
+          GL="${RUNNER_TOOL_CACHE:-/tmp}/gitleaks/${VER}/gitleaks"
+          "$GL" version >/dev/null 2>&1 || { echo "::error::gitleaks ${VER} is not in the tool cache, so the history scan cannot run"; exit 1; }
+          [ -s /tmp/gitleaks.toml ] || { echo "::error::no gitleaks config at /tmp/gitleaks.toml, so the history scan cannot run"; exit 1; }
+          for v in "$BASE" "$PR_HEAD"; do
+            case "$v" in *[!0-9a-f]*|"") echo "::error::no usable PR base or head in the event"; exit 1 ;; esac
+            [ "${#v}" = 40 ] || { echo "::error::no usable PR base or head in the event"; exit 1; }
+          done
+          case "$COMMITS" in *[!0-9]*|"") echo "::error::no usable PR commit count in the event"; exit 1 ;; esac
+          [ "$COMMITS" -ge 1 ] || { echo "::error::the event says the PR has no commits"; exit 1; }
+          # The checkout is one commit deep. Fetching the head one deeper than
+          # the PR has commits brings in the PR's history and the commit it
+          # starts from, so no full clone. A commit at the shallow edge has
+          # no parent here and would read as adding its whole tree, so every
+          # edge commit is left out of the range: the PR's oldest commit is
+          # then diffed against its real parent.
+          git fetch -q --no-tags --depth=1 origin "$BASE"
+          git fetch -q --no-tags --depth="$((COMMITS + 1))" origin "$PR_HEAD"
+          edges=$(sed "s/^/^/" "$(git rev-parse --git-path shallow)" 2>/dev/null | paste -sd ' ' -)
+          # gitleaks 8.28.0 fails open on a git error: it logs "stderr is not
+          # empty", scans 0 commits and exits 0. A blank in --log-opts was
+          # enough to cause that in testing. So its log is read, and a scan
+          # that errored or saw no commit fails, since the PR has at least one.
+          rc=0
+          "$GL" git . -c /tmp/gitleaks.toml --log-opts="$BASE..$PR_HEAD${edges:+ $edges}" \
+            --no-banner --no-color --redact --exit-code 1 > /tmp/gitleaks-pr.log 2>&1 || rc=$?
+          cat /tmp/gitleaks-pr.log
+          [ "$rc" = 0 ] || exit "$rc"
+          # Its log is coloured even with --no-color, so colour is stripped
+          # before reading it.
+          plain=$(sed 's/\x1b\[[0-9;]*m//g' /tmp/gitleaks-pr.log)
+          if grep -q ' ERR ' <<< "$plain" || grep -qE '(^| )0 commits scanned' <<< "$plain"; then
+            echo "::error::gitleaks did not scan the PR's commits (see its log above), so this is not a pass"
+            exit 1
+          fi
+
       # Client-data scrub, check 5 of docs/security-gate-plan.md. Fails on a
       # path `beesec pr` would refuse, and on a line naming a client from the
       # org secret CLIENT_SCRUB_PATTERNS, which this public repository cannot
@@ -746,6 +801,60 @@ jobs:
       # packages between runs, so on every run after the first this was an
       # apt-get update for nothing, and on a workstation runner without
       # passwordless sudo it was the one step that could not run at all.
+      # Secret scan of the PR's own commits, check 1 of
+      # docs/security-gate-plan.md. The dir scan above sees only the final
+      # tree, so a secret committed and then deleted inside the PR passes
+      # it, though the secret is in the history for good. This scans each
+      # of the PR's commits. Off unless security_checks, and shadow until
+      # security_enforce.
+      - name: Secret scan of the PR's commits (gitleaks)
+        id: gitleaks_pr
+        if: inputs.security_checks && github.event_name == 'pull_request'
+        continue-on-error: ${{ !inputs.security_enforce }}
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          COMMITS: ${{ github.event.pull_request.commits }}
+        run: |
+          set -euo pipefail
+          VER=8.28.0
+          # The dir scan just before this step fetched the binary into the tool
+          # cache and the estate config to /tmp/gitleaks.toml. Both are reused.
+          GL="${RUNNER_TOOL_CACHE:-/tmp}/gitleaks/${VER}/gitleaks"
+          "$GL" version >/dev/null 2>&1 || { echo "::error::gitleaks ${VER} is not in the tool cache, so the history scan cannot run"; exit 1; }
+          [ -s /tmp/gitleaks.toml ] || { echo "::error::no gitleaks config at /tmp/gitleaks.toml, so the history scan cannot run"; exit 1; }
+          for v in "$BASE" "$PR_HEAD"; do
+            case "$v" in *[!0-9a-f]*|"") echo "::error::no usable PR base or head in the event"; exit 1 ;; esac
+            [ "${#v}" = 40 ] || { echo "::error::no usable PR base or head in the event"; exit 1; }
+          done
+          case "$COMMITS" in *[!0-9]*|"") echo "::error::no usable PR commit count in the event"; exit 1 ;; esac
+          [ "$COMMITS" -ge 1 ] || { echo "::error::the event says the PR has no commits"; exit 1; }
+          # The checkout is one commit deep. Fetching the head one deeper than
+          # the PR has commits brings in the PR's history and the commit it
+          # starts from, so no full clone. A commit at the shallow edge has
+          # no parent here and would read as adding its whole tree, so every
+          # edge commit is left out of the range: the PR's oldest commit is
+          # then diffed against its real parent.
+          git fetch -q --no-tags --depth=1 origin "$BASE"
+          git fetch -q --no-tags --depth="$((COMMITS + 1))" origin "$PR_HEAD"
+          edges=$(sed "s/^/^/" "$(git rev-parse --git-path shallow)" 2>/dev/null | paste -sd ' ' -)
+          # gitleaks 8.28.0 fails open on a git error: it logs "stderr is not
+          # empty", scans 0 commits and exits 0. A blank in --log-opts was
+          # enough to cause that in testing. So its log is read, and a scan
+          # that errored or saw no commit fails, since the PR has at least one.
+          rc=0
+          "$GL" git . -c /tmp/gitleaks.toml --log-opts="$BASE..$PR_HEAD${edges:+ $edges}" \
+            --no-banner --no-color --redact --exit-code 1 > /tmp/gitleaks-pr.log 2>&1 || rc=$?
+          cat /tmp/gitleaks-pr.log
+          [ "$rc" = 0 ] || exit "$rc"
+          # Its log is coloured even with --no-color, so colour is stripped
+          # before reading it.
+          plain=$(sed 's/\x1b\[[0-9;]*m//g' /tmp/gitleaks-pr.log)
+          if grep -q ' ERR ' <<< "$plain" || grep -qE '(^| )0 commits scanned' <<< "$plain"; then
+            echo "::error::gitleaks did not scan the PR's commits (see its log above), so this is not a pass"
+            exit 1
+          fi
+
       # Client-data scrub, check 5 of docs/security-gate-plan.md. Fails on a
       # path `beesec pr` would refuse, and on a line naming a client from the
       # org secret CLIENT_SCRUB_PATTERNS, which this public repository cannot
