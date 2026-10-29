@@ -243,7 +243,8 @@ on:
         description: >-
           Run the security checks of docs/security-gate-plan.md as steps in
           the gate, or in pick when the gate is skipped: today the
-          client-data scrub. Off by default while their cost is measured.
+          client-data scrub and the dependency and licence check. Off by
+          default while their cost is measured.
         type: boolean
         default: false
 
@@ -836,6 +837,120 @@ jobs:
             exit 1
           fi
           echo "client-data scrub: no private-shaped path and no client named, $(wc -l < "$list") pattern(s)"
+
+      # Dependencies and licences, check 2 of docs/security-gate-plan.md.
+      # OSV-Scanner reads every tracked lockfile against the OSV database
+      # and each package's licence against the allowlist below through
+      # deps.dev, so it needs no install and runs before one. A database it
+      # cannot reach fails the check (decision D). Off unless
+      # security_checks, and shadow until security_enforce.
+      - name: Dependencies and licences (OSV-Scanner)
+        id: osv
+        if: inputs.security_checks
+        continue-on-error: ${{ !inputs.security_enforce }}
+        run: |
+          set -euo pipefail
+          VER=2.7.0
+          # osv-scanner_linux_amd64 from the v2.7.0 release's osv-scanner_SHA256SUMS.
+          SHA256=160c6253e2922e9e0a6a9771c5c4c40a4b3c6090b34a3cdd5e80c96cc2e4218b
+          # Permissive licences only. A copyleft one fails, because these apps ship
+          # as a hosted service and the operator decides each case.
+          ALLOW='MIT,BSD-2-Clause,BSD-3-Clause,Apache-2.0,ISC,PSF-2.0,MPL-2.0,0BSD,Unlicense,CC0-1.0'
+
+          # Every ignore must say why and must run out. Checked before the scan, so
+          # a bad entry fails even when nothing it would hide is present.
+          mapfile -t configs < <(git ls-files -- 'osv-scanner.toml' '**/osv-scanner.toml')
+          if [ "${#configs[@]}" -gt 0 ]; then
+            python3 - "${configs[@]}" <<'PY'
+          import datetime, sys, tomllib
+          today = datetime.datetime.now(datetime.timezone.utc).date()
+          limit = today + datetime.timedelta(days=90)
+          bad = []
+          for path in sys.argv[1:]:
+              try:
+                  with open(path, "rb") as f:
+                      cfg = tomllib.load(f)
+              except (OSError, tomllib.TOMLDecodeError) as e:
+                  bad.append(f"{path}: cannot be read as TOML ({e})")
+                  continue
+              for i, v in enumerate(cfg.get("IgnoredVulns", []), 1):
+                  what = f"{path}: IgnoredVulns {v.get('id', f'#{i}')}"
+                  if not str(v.get("reason", "")).strip():
+                      bad.append(f"{what} has no reason")
+                  until = v.get("ignoreUntil")
+                  if isinstance(until, datetime.datetime):
+                      until = until.date()
+                  elif isinstance(until, str):
+                      try:
+                          until = datetime.date.fromisoformat(until[:10])
+                      except ValueError:
+                          until = None
+                  if not isinstance(until, datetime.date):
+                      bad.append(f"{what} has no ignoreUntil date")
+                  elif until > limit:
+                      bad.append(f"{what} runs to {until}, more than 90 days away (latest {limit})")
+              for i, o in enumerate(cfg.get("PackageOverrides", []), 1):
+                  if not str(o.get("reason", "")).strip():
+                      bad.append(f"{path}: PackageOverrides {o.get('name', f'#{i}')} has no reason")
+          for b in bad:
+              print(f"::error file={b.split(':', 1)[0]}::{b}")
+          sys.exit(1 if bad else 0)
+          PY
+          fi
+
+          # Tracked lockfiles only, wherever they are, so node_modules and a local
+          # venv are never read.
+          mapfile -t locks < <(git ls-files -- 'requirements*.txt' '**/requirements*.txt' 'package-lock.json' '**/package-lock.json' \
+            'poetry.lock' '**/poetry.lock' 'uv.lock' '**/uv.lock' 'pnpm-lock.yaml' '**/pnpm-lock.yaml' 'yarn.lock' '**/yarn.lock' \
+            | grep -v -e '/node_modules/' -e '^node_modules/' || true)
+          if [ "${#locks[@]}" = 0 ]; then
+            echo "::notice::no tracked lockfile, so there are no dependencies to check"
+            exit 0
+          fi
+
+          # The binary is cached per runner like gitleaks, and a download is checked
+          # against the pinned SHA-256 before it is ever run.
+          OSV_DIR="${RUNNER_TOOL_CACHE:-/tmp}/osv-scanner/${VER}"
+          OSV="$OSV_DIR/osv-scanner"
+          if ! "$OSV" --version >/dev/null 2>&1; then
+            mkdir -p "$OSV_DIR"
+            ok=""
+            for attempt in 1 2 3 4; do
+              if curl -sSL --retry 3 --retry-all-errors -o "$OSV_DIR/download" \
+                   "https://github.com/google/osv-scanner/releases/download/v${VER}/osv-scanner_linux_amd64" \
+                 && echo "${SHA256}  $OSV_DIR/download" | sha256sum -c --quiet - 2>/dev/null; then
+                chmod +x "$OSV_DIR/download" && mv "$OSV_DIR/download" "$OSV" && ok=1 && break
+              fi
+              echo "osv-scanner download attempt ${attempt} failed or did not match its checksum; retrying"
+              rm -f "$OSV_DIR/download"; sleep $((attempt * 5))
+            done
+            [ -n "$ok" ] || { echo "::error::could not fetch osv-scanner ${VER} matching its pinned checksum"; exit 1; }
+          fi
+
+          args=(scan source --licenses="$ALLOW" --format=table)
+          [ -f osv-scanner.toml ] && args+=(--config=osv-scanner.toml)
+          for l in "${locks[@]}"; do args+=(-L "$l"); done
+
+          # Exit 0 is clean, 1 a vulnerability or a licence outside the allowlist,
+          # 128 lockfiles with no packages in them. Anything else, an unreachable
+          # database above all, is tried once more and then fails (decision D). An
+          # exit 0 with a database error in the log is a failure too, so the check
+          # can never pass on a scan that did not happen.
+          for attempt in 1 2; do
+            rc=0
+            "$OSV" "${args[@]}" > /tmp/osv.log 2>&1 || rc=$?
+            cat /tmp/osv.log
+            if grep -q '^Error during extraction' /tmp/osv.log; then
+              [ "$rc" = 0 ] && rc=127
+            fi
+            case "$rc" in
+              0|128) echo "osv-scanner: no known vulnerability and no licence outside the allowlist in ${#locks[@]} lockfile(s)"; exit 0 ;;
+              1) echo "::error::osv-scanner found a vulnerability or a licence outside the allowlist. Fix it, or add a reasoned entry to osv-scanner.toml that runs out within 90 days."; exit 1 ;;
+            esac
+            [ "$attempt" = 1 ] && { echo "osv-scanner could not complete (exit $rc); trying once more"; sleep 20; }
+          done
+          echo "::error::osv-scanner could not complete (exit $rc), most likely the vulnerability database was unreachable, and that fails the check"
+          exit 1
 
       - name: Install system packages
         if: inputs.apt_packages != '' && (needs.pick.outputs.api == 'true' || inputs.extra_gate_script != '')
