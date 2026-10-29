@@ -181,7 +181,8 @@ run "a nested osv-scanner.toml is held to the same rules" 1 clean
 # The binary: from the tool cache when it is there, else downloaded and
 # checked against the pinned SHA-256 before it is ever run.
 mkrepo fetch; echo 'django==4.2.16' > "$R/requirements.txt"; track
-printf 'not the binary\n' > "$T/junk"
+# A download that would run, and report itself, if the checksum were skipped.
+printf '#!/bin/sh\necho "the unchecked download ran" >> "$OSV_CALLS"\nexit 0\n' > "$T/junk"; chmod +x "$T/junk"
 CURL_BODY="$T/junk" run "a download that fails the checksum fails" 1 clean "$T/emptycache"
 [ "$(calls)" = 0 ] && pass "and the download is never run" || fail "and the download is never run" "$(calls) calls"
 [ -s "$T/curl.log" ] && pass "and a download was tried" || fail "and a download was tried" "curl was not called"
