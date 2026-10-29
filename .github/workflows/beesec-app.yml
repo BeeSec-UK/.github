@@ -872,12 +872,12 @@ jobs:
       # take a version from an expression, so each supported version has its
       # own step, pinned by commit, and only the one that matches runs. A
       # caller with no deploy-app.yml pin is planned at app-stack-v1.12.3
-      # (decision A). Only on a PR that touches infra/, or on any PR when
+      # (decision A). Only on a PR into main that touches infra/, or on any such PR when
       # the path gates are off. Off unless security_checks and
       # iac_params_file, and shadow until security_enforce.
       - name: IaC policy, the factory version the caller deploys
         id: iac_version
-        if: inputs.security_checks && inputs.iac_params_file != '' && github.event_name == 'pull_request' && needs.pick.outputs.infra == 'true'
+        if: inputs.security_checks && inputs.iac_params_file != '' && github.event_name == 'pull_request' && github.base_ref == 'main' && needs.pick.outputs.infra == 'true'
         continue-on-error: ${{ !inputs.security_enforce }}
         run: |
           set -euo pipefail
