@@ -144,6 +144,14 @@ if command -v ruff-real >/dev/null; then
   run "real ruff fails a blanket noqa" 1 pull_request "$BASE"
   mkrepo realcfg; printf '[tool.ruff.lint]\nignore = ["S"]\n' > "$R/pyproject.toml"; printf 'a = eval("1")\n' > "$R/api/new.py"; commit
   run "real ruff ignores a caller config that turns S off" 1 pull_request "$BASE"
+  # Without --isolated a caller exclude would silence the rules. A plain
+  # `ignore` or per-file-ignores does not, because the command line wins.
+  mkrepo realpfi; printf '[tool.ruff.lint.per-file-ignores]\n"api/*" = ["S"]\n' > "$R/pyproject.toml"; printf 'a = eval("1")\n' > "$R/api/new.py"; commit
+  run "real ruff ignores a caller's per-file-ignores of S" 1 pull_request "$BASE"
+  mkrepo realexcl; printf 'exclude = ["api"]\nforce-exclude = true\n' > "$R/ruff.toml"; printf 'a = eval("1")\n' > "$R/api/new.py"; commit
+  run "real ruff ignores a caller's exclude" 1 pull_request "$BASE"
+  mkrepo realhelper; printf 'def check(x):\n    assert x\n' > "$R/api/tests/helpers.py"; commit
+  run "real ruff allows assert in a tests/ helper that is not test_*.py" 0 pull_request "$BASE"
 else
   echo "SKIP  real ruff (no ruff-real on PATH)"
 fi
