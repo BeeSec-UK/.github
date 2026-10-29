@@ -1,0 +1,57 @@
+# Runs this repository's own tests, tests/*.test.sh, on every pull request
+# and on main. Each test lifts a step out of beesec-app.yml and runs it, so
+# a change to the shared pipeline is tested before any caller uses it.
+#
+# This repository is public, so this runs on a GitHub-hosted runner, which
+# costs nothing on a public repository, and never on the self-hosted
+# beesec-dev runners, where a fork's pull request could run code. It reads
+# the code and nothing else: no secrets and no write permission.
+name: tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # gitleaks-pr.test.sh runs one case against the real gitleaks when it is
+      # on PATH as gitleaks-real, at the version the pipeline pins.
+      - name: Tools
+        run: |
+          set -euo pipefail
+          python3 -c 'import yaml' 2>/dev/null || pip install --user pyyaml
+          VER=8.28.0
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -sSL --retry 3 --retry-all-errors -o "$RUNNER_TEMP/gl.tgz" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${VER}/gitleaks_${VER}_linux_x64.tar.gz"
+          tar xzf "$RUNNER_TEMP/gl.tgz" -C "$RUNNER_TEMP/bin" gitleaks
+          mv "$RUNNER_TEMP/bin/gitleaks" "$RUNNER_TEMP/bin/gitleaks-real"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: tests/*.test.sh
+        run: |
+          set -u
+          shopt -s nullglob
+          tests=(tests/*.test.sh)
+          if [ "${#tests[@]}" = 0 ]; then echo "no tests/*.test.sh on this ref"; exit 0; fi
+          failed=0
+          for t in "${tests[@]}"; do
+            echo "::group::$t"
+            if bash "$t"; then echo "::endgroup::"; else echo "::endgroup::"; echo "::error file=$t::$t failed"; failed=1; fi
+          done
+          exit "$failed"
