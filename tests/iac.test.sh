@@ -63,7 +63,9 @@ for tag in "${!PIN[@]}"; do
     && pass "$tag's step hands over the caller's params file and subscription" || fail "$tag's step hands over the caller's params file and subscription" "with: $(printf '%s' "$s" | jq -c .with)"
 done
 vcond=$(jq -r '.version[0].step.if // empty' "$T/wf.json")
-for want in "inputs.security_checks" "inputs.iac_params_file != ''" "github.event_name == 'pull_request'" "needs.pick.outputs.infra == 'true'"; do
+# github.base_ref: a PR stacked on another branch runs the tests but not the
+# plan, which is for what is about to land on main.
+for want in "inputs.security_checks" "inputs.iac_params_file != ''" "github.event_name == 'pull_request'" "github.base_ref == 'main'" "needs.pick.outputs.infra == 'true'"; do
   case "$vcond" in *"$want"*) pass "the version step runs only when $want" ;; *) fail "the version step runs only when $want" "if: $vcond" ;; esac
 done
 jq -e '.version[0].step."continue-on-error" == "${{ !inputs.security_enforce }}"' "$T/wf.json" >/dev/null \
