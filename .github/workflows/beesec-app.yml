@@ -243,7 +243,8 @@ on:
         description: >-
           Run the security checks of docs/security-gate-plan.md as steps in
           the gate, or in pick when the gate is skipped: today the
-          client-data scrub. Off by default while their cost is measured.
+          client-data scrub and, with iac_params_file, the IaC plan. Off by
+          default while their cost is measured.
         type: boolean
         default: false
 
@@ -254,6 +255,26 @@ on:
           shadow before enforcement. Has no effect without security_checks.
         type: boolean
         default: false
+
+      iac_params_file:
+        description: >-
+          The caller's dev .bicepparam, e.g. infra/dev.bicepparam. Set, and
+          with security_checks on, a PR that touches infra/ runs the factory
+          plan action on it in the gate: the app-stack plan and the hub's
+          baseline rules, offline, with no Azure sign-in. It replaces a
+          caller's own plan job. Empty runs nothing.
+        type: string
+        default: ''
+
+      iac_subscription_name:
+        description: The plan's <app>-<env>, as the factory's baseline.json knows it, e.g. apitoxin-dev.
+        type: string
+        default: ''
+
+      iac_subscription_id:
+        description: The subscription the plan is for. Empty plans against the factory's placeholder id.
+        type: string
+        default: ''
 
     outputs:
       # For a caller that keeps its own deploy jobs (propolis, apiary): the
@@ -293,6 +314,7 @@ jobs:
       tests: ${{ steps.scope.outputs.tests }}
       deploy_api: ${{ steps.scope.outputs.deploy_api }}
       deploy_web: ${{ steps.scope.outputs.deploy_web }}
+      infra: ${{ steps.scope.outputs.infra }}
     steps:
       - id: status-token
         if: inputs.prefer_runner != '' && vars.RUNNER_STATUS_APP_ID != ''
@@ -364,7 +386,7 @@ jobs:
           PR_HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
           set -u
-          api=true; web=true; swa=true; infra=false; reason="everything: gates off"
+          api=true; web=true; swa=true; infra=false; narrowed=false; reason="everything: gates off"
           gh_api() { curl -sS --max-time 20 -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" "https://api.github.com/$1"; }
 
           if [ "$PATH_GATES" = "true" ]; then
@@ -383,7 +405,7 @@ jobs:
               n=$(printf '%s' "$cmp" | jq -r 'if (.files|type)=="array" then (.files|length) else empty end' 2>/dev/null || echo "")
               if [ -n "$n" ] && [ "$n" -gt 0 ] && [ "$n" -lt 300 ] 2>/dev/null; then
                 files=$(printf '%s' "$cmp" | jq -r '.files[].filename')
-                api=false; web=false; swa=false
+                api=false; web=false; swa=false; narrowed=true
                 while IFS= read -r f; do
                   [ -z "$f" ] && continue
                   for p in $SWA_PATHS .github/; do
@@ -449,6 +471,9 @@ jobs:
           echo "web=$web" >> "$GITHUB_OUTPUT"
           echo "tests=$tests" >> "$GITHUB_OUTPUT"
           echo "deploy_api=$api" >> "$GITHUB_OUTPUT"
+          # Whether to run the IaC plan: what the diff says once the path
+          # gates have read it, and true whenever they have not.
+          if [ "$narrowed" = "true" ]; then echo "infra=$infra" >> "$GITHUB_OUTPUT"; else echo "infra=true" >> "$GITHUB_OUTPUT"; fi
           if [ -n "$SWA_PATHS" ]; then
             echo "deploy_web=$swa" >> "$GITHUB_OUTPUT"
           else
@@ -836,6 +861,23 @@ jobs:
             exit 1
           fi
           echo "client-data scrub: no private-shaped path and no client named, $(wc -l < "$list") pattern(s)"
+
+      # IaC policy, check 4 of docs/security-gate-plan.md: the factory plan
+      # action, folded in from the callers' own plan jobs. One factory
+      # version for every caller, because `uses:` cannot take one from an
+      # input: app-stack-v1.12.3 (decision A), pinned by commit. Only on a
+      # PR that touches infra/, or on any PR when the path gates are off.
+      # Off unless security_checks and iac_params_file, and shadow until
+      # security_enforce.
+      - name: IaC policy (factory plan)
+        id: iac
+        if: inputs.security_checks && inputs.iac_params_file != '' && github.event_name == 'pull_request' && needs.pick.outputs.infra == 'true'
+        continue-on-error: ${{ !inputs.security_enforce }}
+        uses: BeeSec-UK/beesec-factory/.github/actions/plan@28b74eb34426471f4450d41f60247a37a9a00e6c # app-stack-v1.12.3
+        with:
+          params-file: ${{ inputs.iac_params_file }}
+          subscription-name: ${{ inputs.iac_subscription_name }}
+          subscription-id: ${{ inputs.iac_subscription_id || '00000000-0000-0000-0000-000000000000' }}
 
       - name: Install system packages
         if: inputs.apt_packages != '' && (needs.pick.outputs.api == 'true' || inputs.extra_gate_script != '')
