@@ -487,28 +487,28 @@ jobs:
           # tried again on failure: on 2026-09-10 a truncated tarball
           # ("gzip: stdin: unexpected end of file") failed a honeycomb main
           # run's gate with exit code 2 and nothing in the code had changed.
-          GL_DIR="${RUNNER_TOOL_CACHE:-/tmp}/gitleaks/${VER}"
+          GL_DIR="${RUNNER_TOOL_CACHE:-$RUNNER_TEMP}/gitleaks/${VER}"
           GL="$GL_DIR/gitleaks"
           if ! "$GL" version >/dev/null 2>&1; then
             mkdir -p "$GL_DIR"
             ok=""
             for attempt in 1 2 3 4; do
-              if curl -sSL --retry 3 --retry-all-errors -o /tmp/gl.tgz \
+              if curl -sSL --retry 3 --retry-all-errors -o "$RUNNER_TEMP/gl.tgz" \
                    "https://github.com/gitleaks/gitleaks/releases/download/v${VER}/gitleaks_${VER}_linux_x64.tar.gz" \
-                 && tar tzf /tmp/gl.tgz >/dev/null 2>&1 \
-                 && tar xzf /tmp/gl.tgz -C "$GL_DIR" gitleaks \
+                 && tar tzf "$RUNNER_TEMP/gl.tgz" >/dev/null 2>&1 \
+                 && tar xzf "$RUNNER_TEMP/gl.tgz" -C "$GL_DIR" gitleaks \
                  && "$GL" version >/dev/null 2>&1; then
                 ok=1; break
               fi
               echo "gitleaks download attempt ${attempt} failed; retrying"
-              rm -f /tmp/gl.tgz "$GL"; sleep $((attempt * 5))
+              rm -f "$RUNNER_TEMP/gl.tgz" "$GL"; sleep $((attempt * 5))
             done
             [ -n "$ok" ] || { echo "::error::could not fetch a usable gitleaks ${VER}"; exit 1; }
           fi
-          curl -sSL --retry 3 --retry-all-errors -o /tmp/gitleaks.toml \
+          curl -sSL --retry 3 --retry-all-errors -o "$RUNNER_TEMP/gitleaks.toml" \
             https://raw.githubusercontent.com/BeeSec-UK/.github/main/.gitleaks.toml
-          grep -q '\[' /tmp/gitleaks.toml || { echo "::error::gitleaks config download was not a TOML file"; exit 1; }
-          "$GL" dir . -c /tmp/gitleaks.toml --no-banner --redact --exit-code 1
+          grep -q '\[' "$RUNNER_TEMP/gitleaks.toml" || { echo "::error::gitleaks config download was not a TOML file"; exit 1; }
+          "$GL" dir . -c "$RUNNER_TEMP/gitleaks.toml" --no-banner --redact --exit-code 1
 
   gate:
     name: Tests (pytest + web gate)
@@ -610,30 +610,30 @@ jobs:
           # tried again on failure: on 2026-09-10 a truncated tarball
           # ("gzip: stdin: unexpected end of file") failed a honeycomb main
           # run's gate with exit code 2 and nothing in the code had changed.
-          GL_DIR="${RUNNER_TOOL_CACHE:-/tmp}/gitleaks/${VER}"
+          GL_DIR="${RUNNER_TOOL_CACHE:-$RUNNER_TEMP}/gitleaks/${VER}"
           GL="$GL_DIR/gitleaks"
           if ! "$GL" version >/dev/null 2>&1; then
             mkdir -p "$GL_DIR"
             ok=""
             for attempt in 1 2 3 4; do
-              if curl -sSL --retry 3 --retry-all-errors -o /tmp/gl.tgz \
+              if curl -sSL --retry 3 --retry-all-errors -o "$RUNNER_TEMP/gl.tgz" \
                    "https://github.com/gitleaks/gitleaks/releases/download/v${VER}/gitleaks_${VER}_linux_x64.tar.gz" \
-                 && tar tzf /tmp/gl.tgz >/dev/null 2>&1 \
-                 && tar xzf /tmp/gl.tgz -C "$GL_DIR" gitleaks \
+                 && tar tzf "$RUNNER_TEMP/gl.tgz" >/dev/null 2>&1 \
+                 && tar xzf "$RUNNER_TEMP/gl.tgz" -C "$GL_DIR" gitleaks \
                  && "$GL" version >/dev/null 2>&1; then
                 ok=1; break
               fi
               echo "gitleaks download attempt ${attempt} failed; retrying"
-              rm -f /tmp/gl.tgz "$GL"; sleep $((attempt * 5))
+              rm -f "$RUNNER_TEMP/gl.tgz" "$GL"; sleep $((attempt * 5))
             done
             [ -n "$ok" ] || { echo "::error::could not fetch a usable gitleaks ${VER}"; exit 1; }
           fi
-          curl -sSL --retry 3 --retry-all-errors -o /tmp/gitleaks.toml \
+          curl -sSL --retry 3 --retry-all-errors -o "$RUNNER_TEMP/gitleaks.toml" \
             https://raw.githubusercontent.com/BeeSec-UK/.github/main/.gitleaks.toml
-          grep -q '\[' /tmp/gitleaks.toml || { echo "::error::gitleaks config download was not a TOML file"; exit 1; }
+          grep -q '\[' "$RUNNER_TEMP/gitleaks.toml" || { echo "::error::gitleaks config download was not a TOML file"; exit 1; }
           # Scan the checked-out tree. `git` mode would rescan full history on
           # every run for no extra safety once history is known clean.
-          "$GL" dir . -c /tmp/gitleaks.toml --no-banner --redact --exit-code 1
+          "$GL" dir . -c "$RUNNER_TEMP/gitleaks.toml" --no-banner --redact --exit-code 1
 
       # Only when something is missing. A self-hosted runner keeps its
       # packages between runs, so on every run after the first this was an
