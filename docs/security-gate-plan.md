@@ -28,29 +28,31 @@ Times are estimates for one PR run on a GTX runner and are measured in step 1 of
 
 ### 1. Secret scanning: gitleaks, extended
 
-- **Change:** on a pull request, also run `gitleaks git --log-opts="<base>..<head>"` over the PR's own commits, so a secret added and later removed is still caught. The existing `dir` scan stays for push and dispatch. The base comes from the event payload, so no full-history fetch is needed.
+- **Change:** on a pull request, also run `gitleaks git --log-opts="<base>..<head>"` over the PR's own commits, so a secret added and later removed is still caught. The existing `dir` scan stays for push and dispatch.
+- **History it needs:** every checkout in `beesec-app.yml` is a one-commit clone of the merge commit, which holds neither the base nor the PR's own commits. So before the scan, the step fetches exactly those: `git fetch --no-tags --depth=$(( commits + 1 )) origin <head_sha>` and `git fetch --no-tags --depth=1 origin <base_sha>`, with `commits`, `head_sha` and `base_sha` read from the event payload. That is a bounded deepen, not full history, and the same fetch serves Semgrep's baseline below. It is added in gate and in the `pick` fallback.
 - **Where:** gate, as today, and the `pick` fallback when the gate is skipped.
 - **Cost:** about 2 s more, single-threaded.
 - **False positives:** handled as today. One central `.gitleaks.toml` in this repository, changed only by a PR here, and `gitleaks:allow` on the line for a known test value. Any allowlist change is tested in both directions, as the original adoption was.
 
 ### 2. Dependencies and licences: OSV-Scanner
 
-- **Tool:** OSV-Scanner v2 (Google, Apache-2.0), a single Go binary. One scan reads `api/requirements*.txt` and `web/package-lock.json` against the OSV database. With `--licenses=<allowlist>` it also checks each package's licence through deps.dev. One tool covers both ecosystems and both checks.
+- **Tool:** OSV-Scanner v2 (Google, Apache-2.0), a single Go binary. One scan reads the caller's `requirements_path` input and `package-lock.json` under its `app_location` input against the OSV database. With `--licenses=<allowlist>` it also checks each package's licence through deps.dev. One tool covers both ecosystems and both checks.
 - **Where:** gate, after the dependency install, in the API half for Python and the web half for npm. It runs when path gates say that half changed, or always when `path_gates` is off.
 - **Cost:** about 5 to 20 s, mostly network. CPU use is small.
 - **Licence allowlist:** kept centrally in this repository. It starts as MIT, BSD-2-Clause, BSD-3-Clause, Apache-2.0, ISC, PSF-2.0, MPL-2.0, 0BSD, Unlicense and CC0-1.0. A copyleft licence such as GPL or AGPL fails, because these apps ship as a hosted service and the operator decides each case.
 - **False positives:**
   - A vulnerability that does not apply is ignored in the caller's `osv-scanner.toml` as `[[IgnoredVulns]]`, with an id, a reason and an `ignoreUntil` date. The gate fails on any entry without a reason or with an `ignoreUntil` more than 90 days away, so no ignore is permanent.
   - A licence exception goes in the same file with a reason, as a per-package override.
+  - **No licence data:** many Python packages have none in deps.dev. A package with no licence fails like a disallowed one, and needs an override with a reason. The shadow week counts these per repository, so the size of that list is known before anything is enforced.
 - **Unreachable database:** the step retries, then fails. That is a red run, not a pass, the same rule as gitleaks.
 
 ### 3. Static analysis: Ruff security rules and Semgrep CE
 
 - **Python:** `ruff check --select S`, the flake8-bandit rules, in `api/`. Ruff (MIT) is a single binary and runs in under a second on these codebases.
 - **TypeScript and Bicep:** Semgrep Community Edition (LGPL-2.1 engine), with a ruleset vendored into this repository at a pinned commit. Runs are offline and repeatable, and nothing is fetched from the registry at run time.
-  - On a PR it runs with `--baseline-commit <base>`, so it reports only findings the PR introduces, and existing debt never blocks a PR.
+  - On a PR it runs with `--baseline-commit <base>`, using the base fetched for gitleaks above, so it reports only findings the PR introduces, and existing debt never blocks a PR. On a push it uses the push's `before` commit the same way.
   - It runs with `--jobs 2`, so one job never takes the whole GTX.
-- **Where:** gate, API half for Ruff, web half for Semgrep.
+- **Where:** gate. Ruff and the Bicep rules run in the API half, because path gates route `infra/` there and an API-only repository never runs the web half. The TypeScript rules run in the web half.
 - **Cost:** Ruff under 1 s. Semgrep is the costliest check, estimated at 20 to 60 s of two cores on a changed-files baseline run. It is the first candidate to be cut down if the measurement in step 1 shows it lengthening the queue.
 - **False positives:**
   - `# noqa: S<code> <reason>` for Ruff and `// nosemgrep: <rule-id> <reason>` for Semgrep, on the line. The gate fails on a suppression with no reason after the rule id.
@@ -72,6 +74,8 @@ Times are estimates for one PR run on a GTX runner and are measured in step 1 of
 - **Paths:** fail on any file in the PR whose path matches the `beesec pr` private shape, `_private/`, `findings-brain.json`, `*.pem`, `*.key`, `id_rsa` or `secrets.md`. The pattern is copied with a test that it matches the CLI's.
 - **Content:** fail on any added line that matches a client pattern list. The list cannot live in this public repository. It is read at run time from an org secret, `CLIENT_SCRUB_PATTERNS`, which reaches the gate through `secrets: inherit`. The step reports only the file and line number, never the matched text, so a match never echoes client data into a log.
 - **Where:** gate, and the `pick` fallback, because a docs-only change is where pasted client data hides.
+- **Empty list:** an empty or missing `CLIENT_SCRUB_PATTERNS` fails the step, never passes it. Dependabot PRs do not receive Actions secrets, so they fail this step until the operator copies the secret into the Dependabot secrets as well. The path half still runs on them.
+- **Who can read the list:** a `pull_request` run takes its workflow from the PR's head, so anyone who can push a branch to a caller repository can edit the caller's workflow to print the secret. Those people are BeeSec staff with write access, who already handle the clients named in it. The risk is accepted under decision B rather than removed, and the secret is limited to the nine caller repositories, not the whole org.
 - **Cost:** under 2 s. It is a `git diff` of the PR and a fixed-string grep.
 - **False positives:** there is no inline override, because client data has no legitimate place in an app repository. A false match is fixed by changing the pattern list, which the operator owns. Fixtures use neutral, made-up engagement references.
 - **Source, decision B:** the list is the org secret above, which the operator owns and keeps current.
@@ -92,7 +96,7 @@ Each step is its own PR in this repository, with the operator as maintainer. Ste
 ## Not covered
 
 - **Repositories that do not call `beesec-app.yml`:** queen, claude-skills, forager, beeline, swarm, nasonov and the rest get only `pr-sections`. Bringing them under the same checks is a separate plan.
-- **Push runs on `main`:** these are not re-scanned beyond today's gitleaks step, because `trust_pr_gate` already proves the tree passed on its PR.
+- **Push runs on `main` where the gate is skipped:** the new checks are steps in the gate, so they run on a push whenever the gate runs. A caller that turns on `trust_pr_gate` skips the gate on a push that came from a merged PR, which already passed them on its PR. Only that case is covered by `pick` alone, which runs gitleaks and the scrub and nothing else. A push that did not come from a PR runs the full gate.
 
 ## Decisions
 
