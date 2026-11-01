@@ -255,6 +255,15 @@ on:
           commit or a pull request ref cannot be chosen, and the checkout
           it drives keeps no credentials. Empty tests the commit the run
           was started on, exactly as before.
+          Two things stay with the caller, and no caller may adopt ref until
+          both hold. First, the deploy job that builds `sha` holds an OIDC
+          token as main, which prod trusts while prod is federated to main's
+          subject, so prod must trust an environment subject instead, or the
+          build must run in a job without id-token. Second, a ref run saves
+          no GitHub cache, because it runs in main's cache scope, but the
+          branch's code can still read the runner's cache token and write
+          main's cache itself, so a prod deploy must not restore a GitHub
+          cache, or ref runs must stay on self-hosted runners.
         type: string
         default: ''
 
@@ -338,7 +347,9 @@ jobs:
             echo "::error::ref is refused because this run can mint an OIDC token as main, and the branch's code would get it too. Grant id-token: write to the caller's deploy job only, not to the job calling beesec-app.yml."
             exit 1
           fi
-          if ! printf '%s' "$REF" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$' || printf '%s' "$REF" | grep -q '\.\.'; then
+          # A bash match, not grep: grep checks a line at a time, so a valid
+          # name, a newline, then anything would pass.
+          if ! [[ $REF =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$ ]] || [[ $REF == *..* ]]; then
             echo "::error::ref is not a branch or tag name"
             exit 1
           fi
@@ -755,7 +766,7 @@ jobs:
           # "Set up Python" before "Aborting cache download as the download
           # time exceeded the timeout", then pip used the local cache anyway
           # (run 34372785601). The tests took 49 seconds.
-          cache: ${{ runner.environment == 'github-hosted' && 'pip' || '' }}
+          cache: ${{ runner.environment == 'github-hosted' && inputs.ref == '' && 'pip' || '' }}
           cache-dependency-path: ${{ inputs.requirements_path }}
 
       - name: Install API dependencies
@@ -777,7 +788,7 @@ jobs:
         with:
           node-version: ${{ inputs.node_version }}
           # See the gate's Set up Python: no GitHub cache on a self-hosted box.
-          cache: ${{ runner.environment == 'github-hosted' && 'npm' || '' }}
+          cache: ${{ runner.environment == 'github-hosted' && inputs.ref == '' && 'npm' || '' }}
           cache-dependency-path: web/package-lock.json
 
       - name: Install web dependencies
@@ -836,7 +847,7 @@ jobs:
         with:
           node-version: ${{ inputs.node_version }}
           # See the gate's Set up Python: no GitHub cache on a self-hosted box.
-          cache: ${{ runner.environment == 'github-hosted' && 'npm' || '' }}
+          cache: ${{ runner.environment == 'github-hosted' && inputs.ref == '' && 'npm' || '' }}
           cache-dependency-path: web/package-lock.json
 
       - name: Install web dependencies
