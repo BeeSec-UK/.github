@@ -21,6 +21,12 @@ wf = yaml.safe_load(open(sys.argv[1]))
 step = next(s for s in wf["jobs"]["pick"]["steps"] if s.get("id") == "target")
 open(sys.argv[2] + "/target.sh", "w").write(step["run"])
 caches = []
+checkouts = []
+for j, job in wf["jobs"].items():
+    for s in job.get("steps", []):
+        if str(s.get("uses", "")).startswith("actions/checkout"):
+            checkouts.append({"job": j, "ref": (s.get("with") or {}).get("ref")})
+json.dump(checkouts, open(sys.argv[2] + "/checkouts.json", "w"))
 for j, job in wf["jobs"].items():
     for s in job.get("steps", []):
         c = (s.get("with") or {}).get("cache")
@@ -29,26 +35,77 @@ for j, job in wf["jobs"].items():
 json.dump(caches, open(sys.argv[2] + "/caches.json", "w"))
 EOF
 
-# A stub curl on PATH that resolves refs/heads/main and nothing else.
+# A stub curl on PATH: branch main, lightweight tag v1, annotated tag v2.
 mkdir -p "$T/bin"
 cat > "$T/bin/curl" <<'EOF'
 #!/usr/bin/env bash
 for a in "$@"; do url=$a; done
 case "$url" in
   */git/ref/heads/main) echo '{"object":{"type":"commit","sha":"0123456789abcdef0123456789abcdef01234567"}}' ;;
+  */git/ref/tags/v1)    echo '{"object":{"type":"commit","sha":"1111111111111111111111111111111111111111"}}' ;;
+  */git/ref/tags/v2)    echo '{"object":{"type":"tag","sha":"7777777777777777777777777777777777777777"}}' ;;
+  */git/tags/7777777777777777777777777777777777777777) echo '{"object":{"type":"commit","sha":"2222222222222222222222222222222222222222"}}' ;;
   *) echo '{"message":"Not Found"}' ;;
 esac
 EOF
 chmod +x "$T/bin/curl"
 
+# run_target REF [VAR=value ...]: the target step with a passing setup,
+# each VAR=value overriding one input.
 run_target() {
-  ( export PATH="$T/bin:$PATH" REF="$1" EVENT=workflow_dispatch GH_REF=refs/heads/main \
+  local ref=$1; shift
+  ( export PATH="$T/bin:$PATH" REF="$ref" EVENT=workflow_dispatch GH_REF=refs/heads/main \
       SHA=ffffffffffffffffffffffffffffffffffffffff DEPLOY_API=false DEPLOY_SWA=false \
-      TOKEN=x REPO=BeeSec-UK/app GITHUB_OUTPUT="$T/out"
+      REF_ENABLED=true TOKEN=x REPO=BeeSec-UK/app GITHUB_OUTPUT="$T/out" \
+      GITHUB_STEP_SUMMARY="$T/summary"
     unset ACTIONS_ID_TOKEN_REQUEST_URL
-    : > "$T/out"
+    for kv in "$@"; do export "${kv?}"; done
+    : > "$T/out"; : > "$T/summary"
     bash "$T/target.sh" > "$T/log" 2>&1 )
 }
+
+# refused NAME PATTERN REF [VAR=value ...]: the run fails, says PATTERN, and
+# outputs no sha.
+refused() {
+  local name=$1 pat=$2; shift 2
+  if run_target "$@"; then
+    fail "$name" "accepted: $(cat "$T/out")"
+  elif grep -q "$pat" "$T/log" && ! grep -q '^sha=' "$T/out"; then
+    pass "$name"
+  else
+    fail "$name" "$(cat "$T/log")"
+  fi
+}
+
+# --- empty ref ------------------------------------------------------------
+
+run_target '' REF_ENABLED= EVENT=push && grep -qx 'sha=ffffffffffffffffffffffffffffffffffffffff' "$T/out" \
+  && pass "an empty ref tests github.sha, on any event" || fail "an empty ref tests github.sha, on any event" "$(cat "$T/log")"
+
+# --- refusals before any lookup ---------------------------------------------
+
+refused "refused until the org confirms prod's environment subject" 'BEESEC_APP_REF_ENABLED' main REF_ENABLED=
+refused "refused unless the org variable is exactly true" 'BEESEC_APP_REF_ENABLED' main REF_ENABLED=yes
+refused "refused on a push" 'manual run dispatched on main' main EVENT=push
+refused "refused on a dispatch off main" 'manual run dispatched on main' main GH_REF=refs/heads/feature
+refused "refused with deploy_api on" 'deploy_api or deploy_swa' main DEPLOY_API=true
+refused "refused with deploy_swa on" 'deploy_api or deploy_swa' main DEPLOY_SWA=true
+refused "refused when the run can mint an OIDC token" 'mint an OIDC token' main ACTIONS_ID_TOKEN_REQUEST_URL=https://example.invalid/token
+
+# --- lookups --------------------------------------------------------------
+
+run_target v1 && grep -qx 'sha=1111111111111111111111111111111111111111' "$T/out" \
+  && pass "a lightweight tag resolves to its commit" || fail "a lightweight tag resolves to its commit" "$(cat "$T/log")"
+run_target v2 && grep -qx 'sha=2222222222222222222222222222222222222222' "$T/out" \
+  && pass "an annotated tag resolves to the commit it tags" || fail "an annotated tag resolves to the commit it tags" "$(cat "$T/log")"
+refused "an unknown ref is refused" 'is not a branch or tag of' nosuchbranch
+
+# --- the tested commit is reported --------------------------------------------
+
+run_target main
+grep -q '0123456789abcdef0123456789abcdef01234567' "$T/summary" && grep -q 'ffffffffffffffffffffffffffffffffffffffff' "$T/summary" \
+  && pass "the job summary names the tested commit and the commit check runs attach to" \
+  || fail "the job summary names the tested commit and the commit check runs attach to" "$(cat "$T/summary")"
 
 # --- the ref shape check --------------------------------------------------
 
@@ -75,6 +132,22 @@ for i in $(seq 0 $((n - 1))); do
   case "$job" in
     gate|gate_web)
       case "$c" in *"inputs.ref == ''"*) pass "$job: a ref run saves no cache" ;; *) fail "$job: a ref run saves no cache" "cache: $c" ;; esac ;;
+    *)
+      # A ref run's branch code can write main's cache scope itself, so a
+      # job that deploys must never restore a GitHub cache.
+      fail "$job: restores no GitHub cache" "cache: $c" ;;
+  esac
+done
+
+# --- checkouts --------------------------------------------------------------
+
+# With ref empty, the checkouts keep their default, the branch a push came
+# from, rather than a detached github.sha.
+for job in pick gate gate_web; do
+  r=$(jq -r --arg j "$job" '[.[] | select(.job == $j)][0].ref // ""' "$T/checkouts.json")
+  case "$r" in
+    *"inputs.ref != ''"*) pass "$job: checks out the default ref when ref is empty" ;;
+    *) fail "$job: checks out the default ref when ref is empty" "ref: $r" ;;
   esac
 done
 
