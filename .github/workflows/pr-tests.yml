@@ -1,0 +1,41 @@
+# Runs every tests/*.test.sh in this repository on each pull request, so
+# a PR here has a check for the merge guard to read. Before this, nothing in
+# the repository ran on pull_request: beesec-app.yml and pr-sections.yml are
+# workflow_call only.
+#
+# This repository is public, so a fork's pull request runs whatever its
+# branch holds. That is why this is GitHub-hosted, free on a public
+# repository, and never on the self-hosted pools, with a read-only token and
+# no stored credentials. tests/pr-tests.test.sh keeps it that way.
+name: tests
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: tests/*.test.sh
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Run every test
+        run: |
+          python3 -c 'import yaml' 2>/dev/null || python3 -m pip install --quiet --break-system-packages pyyaml
+          fails=0
+          for t in tests/*.test.sh; do
+            [ -e "$t" ] || continue
+            echo "::group::$t"
+            bash "$t" || { fails=$((fails + 1)); echo "::error file=$t::$t failed"; }
+            echo "::endgroup::"
+          done
+          [ "$fails" -eq 0 ]
