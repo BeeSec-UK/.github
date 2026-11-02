@@ -29,13 +29,23 @@ for j, job in wf["jobs"].items():
     check(f"{j}: raises no permission", "permissions" not in job, repr(job.get("permissions")))
     steps = job.get("steps", [])
     co = [s for s in steps if str(s.get("uses", "")).startswith("actions/checkout")]
+    check(f"{j}: has a plain check name", isinstance(job.get("name"), str) and job["name"].replace("-", "").isalnum(), repr(job.get("name")))
+    for st in steps:
+        u = str(st.get("uses", ""))
+        if u:
+            ref = u.rpartition("@")[2]
+            check(f"{j}: {u.partition('@')[0]} is pinned to a commit SHA",
+                  len(ref) == 40 and all(c in "0123456789abcdef" for c in ref), u)
     check(f"{j}: checkout keeps no credentials",
           bool(co) and all((s.get("with") or {}).get("persist-credentials") is False for s in co), repr(co))
     runs = " ".join(s.get("run", "") for s in steps)
     check(f"{j}: runs every tests/*.test.sh", "tests/*.test.sh" in runs, runs[:200])
 PY
+rc=$?
 cat "$T/out"
 fails=$(grep -c '^FAIL\|Error' "$T/out")
+# A crash in the checker counts as a failure even if it printed no FAIL line.
+[ "$rc" -eq 0 ] || { echo "FAIL  the checker exited $rc"; fails=$((fails + 1)); }
 
 echo
 [ "$fails" -eq 0 ] && echo "all passed" || echo "$fails failed"
