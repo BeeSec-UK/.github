@@ -247,7 +247,10 @@ on:
           main's OIDC subject and a run from any other ref fails its login.
           Resolved once to a SHA in the pick job, which the gate checks out
           and the caller passes to deploy-app.yml as `source-ref` through
-          the `sha` output. The built-in deploys never follow it, so it is
+          the `ref_sha` output, to dev only. The `sha` output stays
+          github.sha on every run, so a caller that wires `sha` into its
+          prod deploy keeps deploying main. The built-in deploys never
+          follow it, so it is
           refused while deploy_api or deploy_swa is on, and refused when the
           job calling this workflow holds id-token: write, because the
           branch's code would then get an OIDC token as main. It names a
@@ -255,18 +258,23 @@ on:
           commit or a pull request ref cannot be chosen, and the checkout
           it drives keeps no credentials. Empty tests the commit the run
           was started on, exactly as before.
-          ref is refused until org variable BEESEC_APP_REF_ENABLED is
-          `true`, which is set only once prod no longer trusts main's
-          subject. The deploy job that builds `sha` holds an OIDC token as
-          main, so prod must first trust an environment subject such as
-          repo:BeeSec-UK/<app>:environment:prod, with that environment
-          restricted to main, or the build must run in a job without
-          id-token. A ref run saves no GitHub cache, because it runs in
-          main's cache scope, but the branch's code can still read the
-          runner's cache token and write main's cache itself, on any runner,
-          self-hosted included. So a job that deploys must never restore a
-          GitHub cache: deploy_api here restores none, and a caller's own
-          deploy job must not either.
+          ref is refused unless the calling repository is listed in
+          REF_REPOS in the pick job's target step. The list lives in this
+          workflow, not in a variable a caller's admin could override, so
+          enabling ref for an app is a reviewed PR here, one app at a time.
+          It ships empty. An app is listed only once its prod deploy job
+          builds github.sha rather than `ref_sha` and refuses to run when
+          `ref_run` is true, so a dispatch on main cannot carry a branch
+          commit through a prod environment restricted to main.
+          A ref run saves no GitHub cache, because it runs in main's cache
+          scope, but the branch's code can still read the runner's cache
+          token and write main's cache itself. So a job that deploys must
+          never restore a GitHub cache: deploy_api here restores none, and
+          a caller's own deploy job must not either. That rule covers the
+          GitHub cache only. A self-hosted runner also keeps its workspace,
+          ~/.cache and RUNNER_TOOL_CACHE between jobs, and branch code
+          could leave something there for a later job on the same box, as
+          a same-repo pull request run already could.
         type: string
         default: ''
 
@@ -285,8 +293,14 @@ on:
         description: Whether the gate ran at all on this run.
         value: ${{ jobs.pick.outputs.tests }}
       sha:
-        description: The commit the gate tested, `ref` resolved or github.sha. A caller deploys this one.
+        description: github.sha, on every run, ref or not. A prod deploy builds this one and nothing else.
         value: ${{ jobs.pick.outputs.sha }}
+      ref_sha:
+        description: The commit `ref` resolved to and the gate tested. Empty unless ref is set. For a dev deploy only.
+        value: ${{ jobs.pick.outputs.ref_sha }}
+      ref_run:
+        description: "'true' when this run tested `ref` rather than github.sha. A prod deploy job refuses to run when it is."
+        value: ${{ jobs.pick.outputs.ref_run }}
 
 jobs:
   # Which runner the rest of the run lands on. See `prefer_runner`. The
@@ -311,7 +325,9 @@ jobs:
       tests: ${{ steps.scope.outputs.tests }}
       deploy_api: ${{ steps.scope.outputs.deploy_api }}
       deploy_web: ${{ steps.scope.outputs.deploy_web }}
-      sha: ${{ steps.target.outputs.sha }}
+      sha: ${{ github.sha }}
+      ref_sha: ${{ steps.target.outputs.ref_sha }}
+      ref_run: ${{ inputs.ref != '' }}
     steps:
       # The commit this run tests, resolved once so every job checks out the
       # same bytes even if the branch moves mid-run. See the `ref` input.
@@ -325,21 +341,26 @@ jobs:
           SHA: ${{ github.sha }}
           DEPLOY_API: ${{ inputs.deploy_api }}
           DEPLOY_SWA: ${{ inputs.deploy_swa }}
-          REF_ENABLED: ${{ vars.BEESEC_APP_REF_ENABLED }}
+          # Repositories allowed to use ref, space-separated, owner/name.
+          # A literal, never a variable, so only a PR to this repository
+          # can change it. See the ref input for when an app is listed.
+          REF_REPOS: ''
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
+          # No ref: nothing to resolve, the jobs check out their default
+          # and ref_sha stays empty.
           if [ -z "$REF" ]; then
-            echo "sha=$SHA" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          # Off until prod trusts an environment subject, not main's. See
-          # the ref input.
-          if [ "$REF_ENABLED" != "true" ]; then
-            echo "::error::ref is refused until org variable BEESEC_APP_REF_ENABLED is true, which is set once prod's managed identities trust an environment subject rather than main's"
-            exit 1
-          fi
+          # Off for every app until it is listed here. See the ref input.
+          case " $REF_REPOS " in
+            *" $REPO "*) ;;
+            *)
+              echo "::error::ref is refused because $REPO is not in REF_REPOS in beesec-app.yml. An app is added by a PR there once its prod deploy builds github.sha and refuses a ref run."
+              exit 1 ;;
+          esac
           if [ "$EVENT" != "workflow_dispatch" ] || [ "$GH_REF" != "refs/heads/main" ]; then
             echo "::error::ref is for a manual run dispatched on main only; this is $EVENT on $GH_REF"
             exit 1
@@ -381,7 +402,7 @@ jobs:
             exit 1
           fi
           echo "testing $REF at $sha"
-          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "ref_sha=$sha" >> "$GITHUB_OUTPUT"
           # The gate's check runs attach to github.sha, main's head, not to
           # the commit tested, so say which one was.
           {
@@ -586,7 +607,7 @@ jobs:
         if: steps.scope.outputs.tests != 'true'
         with:
           # Empty unless ref is set, so a push still checks out its branch.
-          ref: ${{ inputs.ref != '' && steps.target.outputs.sha || '' }}
+          ref: ${{ inputs.ref != '' && steps.target.outputs.ref_sha || '' }}
           # Branch code from `ref` gets no stored token to reuse.
           persist-credentials: ${{ inputs.ref == '' }}
       - name: Secret scan (gitleaks), because the gate is skipped
@@ -683,7 +704,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
-          ref: ${{ inputs.ref != '' && needs.pick.outputs.sha || '' }}
+          ref: ${{ inputs.ref != '' && needs.pick.outputs.ref_sha || '' }}
           persist-credentials: ${{ inputs.ref == '' }}
 
       # SECRET SCAN FIRST, before anything expensive.
@@ -856,7 +877,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
-          ref: ${{ inputs.ref != '' && needs.pick.outputs.sha || '' }}
+          ref: ${{ inputs.ref != '' && needs.pick.outputs.ref_sha || '' }}
           persist-credentials: ${{ inputs.ref == '' }}
 
       - name: Set up Node
