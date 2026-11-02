@@ -255,15 +255,18 @@ on:
           commit or a pull request ref cannot be chosen, and the checkout
           it drives keeps no credentials. Empty tests the commit the run
           was started on, exactly as before.
-          Two things stay with the caller, and no caller may adopt ref until
-          both hold. First, the deploy job that builds `sha` holds an OIDC
-          token as main, which prod trusts while prod is federated to main's
-          subject, so prod must trust an environment subject instead, or the
-          build must run in a job without id-token. Second, a ref run saves
-          no GitHub cache, because it runs in main's cache scope, but the
-          branch's code can still read the runner's cache token and write
-          main's cache itself, so a prod deploy must not restore a GitHub
-          cache, or ref runs must stay on self-hosted runners.
+          ref is refused until org variable BEESEC_APP_REF_ENABLED is
+          `true`, which is set only once prod no longer trusts main's
+          subject. The deploy job that builds `sha` holds an OIDC token as
+          main, so prod must first trust an environment subject such as
+          repo:BeeSec-UK/<app>:environment:prod, with that environment
+          restricted to main, or the build must run in a job without
+          id-token. A ref run saves no GitHub cache, because it runs in
+          main's cache scope, but the branch's code can still read the
+          runner's cache token and write main's cache itself, on any runner,
+          self-hosted included. So a job that deploys must never restore a
+          GitHub cache: deploy_api here restores none, and a caller's own
+          deploy job must not either.
         type: string
         default: ''
 
@@ -322,6 +325,7 @@ jobs:
           SHA: ${{ github.sha }}
           DEPLOY_API: ${{ inputs.deploy_api }}
           DEPLOY_SWA: ${{ inputs.deploy_swa }}
+          REF_ENABLED: ${{ vars.BEESEC_APP_REF_ENABLED }}
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
         run: |
@@ -329,6 +333,12 @@ jobs:
           if [ -z "$REF" ]; then
             echo "sha=$SHA" >> "$GITHUB_OUTPUT"
             exit 0
+          fi
+          # Off until prod trusts an environment subject, not main's. See
+          # the ref input.
+          if [ "$REF_ENABLED" != "true" ]; then
+            echo "::error::ref is refused until org variable BEESEC_APP_REF_ENABLED is true, which is set once prod's managed identities trust an environment subject rather than main's"
+            exit 1
           fi
           if [ "$EVENT" != "workflow_dispatch" ] || [ "$GH_REF" != "refs/heads/main" ]; then
             echo "::error::ref is for a manual run dispatched on main only; this is $EVENT on $GH_REF"
@@ -372,6 +382,12 @@ jobs:
           fi
           echo "testing $REF at $sha"
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          # The gate's check runs attach to github.sha, main's head, not to
+          # the commit tested, so say which one was.
+          {
+            echo "### Tested \`$REF\` at \`$sha\`"
+            echo "This run's check runs attach to \`$SHA\`, the commit it was dispatched on, not to the commit tested."
+          } >> "$GITHUB_STEP_SUMMARY"
       - id: status-token
         if: inputs.prefer_runner != '' && vars.RUNNER_STATUS_APP_ID != ''
         continue-on-error: true
@@ -569,7 +585,8 @@ jobs:
       - uses: actions/checkout@v4
         if: steps.scope.outputs.tests != 'true'
         with:
-          ref: ${{ steps.target.outputs.sha }}
+          # Empty unless ref is set, so a push still checks out its branch.
+          ref: ${{ inputs.ref != '' && steps.target.outputs.sha || '' }}
           # Branch code from `ref` gets no stored token to reuse.
           persist-credentials: ${{ inputs.ref == '' }}
       - name: Secret scan (gitleaks), because the gate is skipped
@@ -666,7 +683,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
-          ref: ${{ needs.pick.outputs.sha }}
+          ref: ${{ inputs.ref != '' && needs.pick.outputs.sha || '' }}
           persist-credentials: ${{ inputs.ref == '' }}
 
       # SECRET SCAN FIRST, before anything expensive.
@@ -839,7 +856,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
-          ref: ${{ needs.pick.outputs.sha }}
+          ref: ${{ inputs.ref != '' && needs.pick.outputs.sha || '' }}
           persist-credentials: ${{ inputs.ref == '' }}
 
       - name: Set up Node
@@ -1055,9 +1072,8 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ inputs.python_version }}
-          # See the gate's Set up Python: no GitHub cache on a self-hosted box.
-          cache: ${{ runner.environment == 'github-hosted' && 'pip' || '' }}
-          cache-dependency-path: ${{ inputs.package_requirements_path }}
+          # No GitHub cache: this job deploys to prod, and a ref run's branch
+          # code can write entries into main's cache scope. See the ref input.
 
       - name: Vendor dependencies into the package
         run: |
