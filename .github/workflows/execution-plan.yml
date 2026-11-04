@@ -9,8 +9,8 @@
 #   - the first line is `# Execution plan: <project>`
 #   - then these headings, in this order, none left out: Goal, Plan,
 #     Costing, Work packages, Plan coverage, Goal coverage, Route to prod,
-#     Dependencies outside this project, Decisions, Risks. Another `## `
-#     section in between is not refused.
+#     Dependencies outside this project, Decisions, Risks, and no other
+#     `## ` section. Anything else goes in a package section or under Risks.
 #   - after Risks, one `### <ID>. <outcome>` section per package, in table
 #     order, each with Why this model, Depends on, Gate on dev, Done when and
 #     Build prompt as labelled fields, in that order
@@ -138,6 +138,9 @@ jobs:
               if name not in at:
                   err(0, f"There is no '## {name}' heading. Every plan has these sections in this order: "
                          + ", ".join(SECTIONS) + ". A section with nothing to say says None and why.")
+          for i, name in h2:
+              if name not in SECTIONS:
+                  err(i + 1, f"'## {name}' is not one of the ten sections. Move it into a package section or under Risks.")
           present = [n for n in SECTIONS if n in at]
           for prev, name in zip(present, present[1:]):
               if at[name] < at[prev]:
