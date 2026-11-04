@@ -79,3 +79,20 @@ You are building ST-2.
 You are building ST-1.
 ## Not a section heading
 ```
+
+### ST-3. Release notes
+
+**Why this model:** something for ST-3.
+
+**Depends on:** something for ST-3.
+
+**Gate on dev:** something for ST-3.
+
+**Done when:** something for ST-3.
+
+**Build prompt:**
+
+```text
+You are building ST-3.
+## Not a section heading
+```
