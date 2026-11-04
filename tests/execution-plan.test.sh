@@ -61,6 +61,7 @@ declare -A KEY=(
   [title]="# Execution plan: <project>"
   [sections]="There is no '## "
   [order]="is out of order. The sections run"
+  [extra]="is not one of the ten sections"
   [packages]="package sections are out of order"
   [packages-missing]="has no '### "
   [fields]="section has no"

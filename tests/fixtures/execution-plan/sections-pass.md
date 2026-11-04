@@ -12,10 +12,6 @@ Text about plan.
 
 Text about costing.
 
-## Notes
-
-Text about notes.
-
 ## Work packages
 
 | ID | Outcome | Depends on | Owner | Model | Hours | Tokens (M) | Gate on dev | State |
