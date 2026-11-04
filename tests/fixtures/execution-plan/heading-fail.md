@@ -12,7 +12,7 @@ Text about plan.
 
 Text about costing.
 
-## Work Package list
+Work packages:
 
 | ID | Outcome | Depends on | Owner | Model | Hours | Tokens (M) | Gate on dev | State |
 |---|---|---|---|---|---|---|---|---|
