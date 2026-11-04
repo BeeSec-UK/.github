@@ -1,0 +1,159 @@
+# Fails a pull request that changes docs/execution-plan.md while its Work
+# packages table is not in the standard shape, so hive's Programme page can
+# read every project's work packages. The standard is the operator's decision
+# of 4 Nov 2026 ("standardise"), written up in the orchestrator repository at
+# standards/execution-plan.md. The rules are copied into the check below, so
+# it never needs that checkout:
+#
+#   - a `## Work packages` heading, with a table under it
+#   - the header row starts with ID, Outcome, Depends on, Owner, Model, Hours,
+#     Tokens (M), Gate on dev, State, in that order, and may end with Phase
+#   - every ID matches ^[A-Z][A-Z0-9]{0,7}-\d{1,5}[a-z]?$ and is unique
+#   - Hours and Tokens (M) are plain numbers, never blank
+#   - State is not_started, in_progress, in_review, blocked or done
+#   - Depends on is – or IDs from the same table, separated by commas
+#
+# Only the table is read. Prose, prompts and other tables are not checked. A
+# pull request that does not touch the plan passes without reading it, so
+# the check can be made required later without blocking unrelated work.
+# Whether it is required is the operator's call, not this file's.
+#
+# The plan is read as a file and nothing in it runs. The token is
+# contents: read and is not left in the checkout. A caller is the whole
+# per-repo file:
+#
+#   name: execution-plan
+#   on:
+#     pull_request:
+#       types: [opened, reopened, synchronize, ready_for_review]
+#   permissions:
+#     contents: read
+#   jobs:
+#     plan:
+#       uses: BeeSec-UK/.github/.github/workflows/execution-plan.yml@main
+#
+# Tests: bash tests/execution-plan.test.sh
+name: execution-plan
+
+on:
+  workflow_call:
+
+permissions: {}
+
+jobs:
+  plan:
+    runs-on: beesec-preflight
+    timeout-minutes: 3
+    if: github.event_name == 'pull_request' && !github.event.pull_request.draft
+    permissions:
+      contents: read
+    steps:
+      # Depth 2 brings both parents of the merge commit a pull_request run
+      # checks out, so the PR's changes are HEAD^1..HEAD with no further fetch.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Did the pull request change the plan
+        id: changed
+        shell: bash
+        run: |
+          set -uo pipefail
+          # Exit 1 is a change. Any other failure, such as a missing parent,
+          # also counts as changed, so the check runs rather than being skipped.
+          if git diff --quiet HEAD^1 HEAD -- docs/execution-plan.md; then
+            echo plan=false >> "$GITHUB_OUTPUT"
+            echo "docs/execution-plan.md is unchanged, nothing to check."
+          else
+            echo plan=true >> "$GITHUB_OUTPUT"
+          fi
+      - name: Work packages table
+        id: check
+        if: steps.changed.outputs.plan == 'true'
+        shell: python3 {0}
+        run: |
+          import os, re, sys
+          path = os.environ.get("PLAN", "docs/execution-plan.md")
+          if not os.path.exists(path):
+              print(f"{path} was removed, so there is no table to check.")
+              sys.exit(0)
+          lines = open(path, encoding="utf-8").read().splitlines()
+          errors = []
+          def err(line, msg):
+              errors.append((line, msg))
+          def done():
+              for line, msg in errors:
+                  loc = f",line={line}" if line else ""
+                  print(f"::error file={path}{loc},title=Execution plan::{msg}")
+              if errors:
+                  print(f"{len(errors)} problem(s). The standard is orchestrator standards/execution-plan.md.")
+                  sys.exit(1)
+              print("The Work packages table is in the standard shape.")
+              sys.exit(0)
+          def cells(row):
+              row = row.strip()
+              row = row[1:] if row.startswith("|") else row
+              row = row[:-1] if row.endswith("|") and not row.endswith("\\|") else row
+              return [c.strip().replace("\\|", "|") for c in re.split(r"(?<!\\)\|", row)]
+
+          start = next((i for i, l in enumerate(lines) if re.fullmatch(r"##[ \t]+Work packages[ \t]*", l)), None)
+          if start is None:
+              err(0, "There is no '## Work packages' heading. The work packages table goes under it.")
+              done()
+          table, i = [], start + 1
+          while i < len(lines) and not lines[i].startswith("## "):
+              if lines[i].lstrip().startswith("|"):
+                  while i < len(lines) and lines[i].lstrip().startswith("|"):
+                      table.append((i + 1, lines[i])); i += 1
+                  break
+              i += 1
+          if len(table) < 2:
+              err(start + 1, "There is no table under '## Work packages'.")
+              done()
+
+          COLS = ["ID", "Outcome", "Depends on", "Owner", "Model", "Hours", "Tokens (M)", "Gate on dev", "State"]
+          (hline, hrow), (sline, srow) = table[0], table[1]
+          header = cells(hrow)
+          if header[:9] != COLS or header[9:] not in ([], ["Phase"]):
+              err(hline, "The header row must be | " + " | ".join(COLS) + " |, optionally followed by | Phase |. "
+                         "It is | " + " | ".join(header) + " |.")
+              done()
+          if not all(re.fullmatch(r":?-{3,}:?", c) for c in cells(srow)):
+              err(sline, "The header row must be followed by a |---| separator row.")
+              done()
+
+          ID = re.compile(r"[A-Z][A-Z0-9]{0,7}-\d{1,5}[a-z]?")
+          NUM = re.compile(r"\d+(?:\.\d+)?")
+          STATES = ("not_started", "in_progress", "in_review", "blocked", "done")
+          rows = []
+          for line, raw in table[2:]:
+              c = cells(raw)
+              if len(c) != len(header):
+                  err(line, f"This row has {len(c)} cells, and the header has {len(header)}.")
+                  continue
+              rows.append((line, dict(zip(header, c))))
+          seen = {}
+          for line, r in rows:
+              wp = r["ID"]
+              if not ID.fullmatch(wp):
+                  err(line, f"'{wp}' is not a valid ID. Use a prefix of up to eight capitals, a hyphen and a number, such as ST-1 or RS-22b.")
+              if wp in seen:
+                  err(line, f"{wp} is used more than once, first on line {seen[wp]}.")
+              seen.setdefault(wp, line)
+          ids = set(seen)
+          for line, r in rows:
+              wp = r["ID"]
+              for col in ("Hours", "Tokens (M)"):
+                  if not NUM.fullmatch(r[col]):
+                      shown = f"'{r[col]}'" if r[col] else "blank"
+                      err(line, f"{col} on {wp} must be a number, and is {shown}.")
+              if r["State"] not in STATES:
+                  err(line, f"State '{r['State']}' on {wp} is not one of " + ", ".join(STATES) + ".")
+              dep = r["Depends on"]
+              if dep != "–":
+                  parts = [p.strip() for p in dep.split(",")]
+                  bad = [p for p in parts if p not in ids]
+                  if not dep or bad:
+                      shown = ", ".join(f"'{b}'" for b in bad) if dep else "blank"
+                      err(line, f"Depends on for {wp} must be – or IDs from this table. {shown} is not.")
+          done()
