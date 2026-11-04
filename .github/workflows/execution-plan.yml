@@ -1,9 +1,21 @@
-# Fails a pull request that changes docs/execution-plan.md while its Work
-# packages table is not in the standard shape, so hive's Programme page can
-# read every project's work packages. The standard is the operator's decision
-# of 4 Nov 2026 ("standardise"), written up in the orchestrator repository at
-# standards/execution-plan.md. The rules are copied into the check below, so
-# it never needs that checkout:
+# Fails a pull request that changes docs/execution-plan.md while the plan is
+# not in the standard composition, or its Work packages table is not in the
+# standard shape, so hive's Programme page can read every project's work
+# packages. The standard is the operator's decisions of 4 Nov 2026, written
+# up in the orchestrator repository at standards/execution-plan.md (a6208b6).
+# The rules are copied into the check below, so it never needs that
+# checkout. The composition:
+#
+#   - the first line is `# Execution plan: <project>`
+#   - then these headings, in this order, none left out: Goal, Plan,
+#     Costing, Work packages, Plan coverage, Goal coverage, Route to prod,
+#     Dependencies outside this project, Decisions, Risks. Another `## `
+#     section in between is not refused.
+#   - after Risks, one `### <ID>. <outcome>` section per package, in table
+#     order, each with Why this model, Depends on, Gate on dev, Done when and
+#     Build prompt as labelled fields, in that order
+#
+# The table:
 #
 #   - a `## Work packages` heading, with a table under it
 #   - the header row starts with ID, Outcome, Depends on, Owner, Model, Hours,
@@ -13,7 +25,8 @@
 #   - State is not_started, in_progress, in_review, blocked or done
 #   - Depends on is – or IDs from the same table, separated by commas
 #
-# Only the table is read. Prose, prompts and other tables are not checked. A
+# Headings and labels inside fenced code, such as a build prompt, are not
+# read. What a section says is not checked, only that it is there. A
 # pull request that does not touch the plan passes without reading it, so
 # the check can be made required later without blocking unrelated work.
 # Whether it is required is the operator's call, not this file's.
@@ -75,9 +88,23 @@ jobs:
           import os, re, sys
           path = os.environ.get("PLAN", "docs/execution-plan.md")
           if not os.path.exists(path):
-              print(f"{path} was removed, so there is no table to check.")
+              print(f"{path} was removed, so there is no plan to check.")
               sys.exit(0)
-          lines = open(path, encoding="utf-8").read().splitlines()
+          raw = open(path, encoding="utf-8").read().splitlines()
+          # Lines inside fenced code are blanked, so a build prompt's own
+          # headings and labels are never read as the plan's.
+          lines, fence = [], None
+          for l in raw:
+              m = re.match(r"[ \t]*(`{3,}|~{3,})", l)
+              if fence:
+                  if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence):
+                      fence = None
+                  lines.append("")
+              elif m:
+                  fence = m.group(1)
+                  lines.append("")
+              else:
+                  lines.append(l)
           errors = []
           def err(line, msg):
               errors.append((line, msg))
@@ -88,7 +115,7 @@ jobs:
               if errors:
                   print(f"{len(errors)} problem(s). The standard is orchestrator standards/execution-plan.md.")
                   sys.exit(1)
-              print("The Work packages table is in the standard shape.")
+              print("The plan has the required composition and its Work packages table is in the standard shape.")
               sys.exit(0)
           def cells(row):
               row = row.strip()
@@ -96,9 +123,28 @@ jobs:
               row = row[:-1] if row.endswith("|") and not row.endswith("\\|") else row
               return [c.strip().replace("\\|", "|") for c in re.split(r"(?<!\\)\|", row)]
 
-          start = next((i for i, l in enumerate(lines) if re.fullmatch(r"##[ \t]+Work packages[ \t]*", l)), None)
+          # The composition: the title, then the ten sections in order.
+          SECTIONS = ["Goal", "Plan", "Costing", "Work packages", "Plan coverage", "Goal coverage",
+                      "Route to prod", "Dependencies outside this project", "Decisions", "Risks"]
+          first = next((i for i, l in enumerate(lines) if l.strip()), None)
+          if first is None or not re.fullmatch(r"# Execution plan: \S.*", lines[first].rstrip()):
+              err((first or 0) + 1, "The first line must be '# Execution plan: <project>'.")
+          h2 = [(i, re.fullmatch(r"##[ \t]+(.*?)[ \t]*", l).group(1)) for i, l in enumerate(lines)
+                if re.fullmatch(r"##[ \t]+(.*?)[ \t]*", l)]
+          at = {}
+          for i, name in h2:
+              at.setdefault(name, i)
+          for name in SECTIONS:
+              if name not in at:
+                  err(0, f"There is no '## {name}' heading. Every plan has these sections in this order: "
+                         + ", ".join(SECTIONS) + ". A section with nothing to say says None and why.")
+          present = [n for n in SECTIONS if n in at]
+          for prev, name in zip(present, present[1:]):
+              if at[name] < at[prev]:
+                  err(at[name] + 1, f"'## {name}' is out of order. The sections run " + ", ".join(SECTIONS) + ".")
+
+          start = at.get("Work packages")
           if start is None:
-              err(0, "There is no '## Work packages' heading. The work packages table goes under it.")
               done()
           table, i = [], start + 1
           while i < len(lines) and not lines[i].startswith("## "):
@@ -156,4 +202,35 @@ jobs:
                   if not dep or bad:
                       shown = ", ".join(f"'{b}'" for b in bad) if dep else "blank"
                       err(line, f"Depends on for {wp} must be – or IDs from this table. {shown} is not.")
+
+          # One package section per row, after Risks, in table order, each
+          # with the five fields in order.
+          FIELDS = ["Why this model", "Depends on", "Gate on dev", "Done when", "Build prompt"]
+          after = at.get("Risks", start)
+          heads = [(i, m.group(1)) for i, l in enumerate(lines) if i > after
+                   for m in [re.match(r"###[ \t]+(\S+?)\.[ \t]+\S", l)] if m]
+          want = [r["ID"] for _, r in rows]
+          got = [wp for _, wp in heads]
+          for wp in want:
+              if wp not in got:
+                  err(0, f"{wp} has no '### {wp}. <outcome>' section after '## Risks'.")
+          for i, wp in heads:
+              if wp not in ids:
+                  err(i + 1, f"'### {wp}.' is not a package in the Work packages table.")
+          common = [wp for wp in got if wp in want]
+          if common != [wp for wp in want if wp in got]:
+              err(heads[0][0] + 1, "The package sections are out of order. They follow the table: " + ", ".join(want) + ".")
+          for n, (i, wp) in enumerate(heads):
+              end = next((j for j in range(i + 1, len(lines)) if re.match(r"#{1,3}[ \t]", lines[j])), len(lines))
+              pos = {}
+              for j in range(i + 1, end):
+                  for f in FIELDS:
+                      if f not in pos and re.match(r"[ \t]*(\*\*)?" + re.escape(f) + r"(:\*\*|\*\*:?|:)", lines[j]):
+                          pos[f] = j
+              for f in FIELDS:
+                  if f not in pos:
+                      err(i + 1, f"The {wp} section has no **{f}** field.")
+              seen_f = [f for f in FIELDS if f in pos]
+              if [f for f in sorted(pos, key=pos.get)] != seen_f:
+                  err(i + 1, f"The fields in the {wp} section are out of order. They run " + ", ".join(FIELDS) + ".")
           done()
