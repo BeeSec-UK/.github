@@ -23,7 +23,11 @@
 #   - every ID matches ^[A-Z][A-Z0-9]{0,7}-\d{1,5}[a-z]?$ and is unique
 #   - Hours and Tokens (M) are plain numbers, never blank
 #   - State is not_started, in_progress, in_review, blocked or done
-#   - Depends on is – or IDs from the same table, separated by commas
+#   - Depends on is –, or a comma-separated list of package IDs and
+#     operator decisions written <prefix>-D<n>, such as pollen-D1. A package
+#     ID with one of this table's prefixes must be in the table. Another
+#     project's, such as AC-25, is allowed (standard at 0557b1e). A pull
+#     request or any other reference goes in the package's section.
 #
 # Headings and labels inside fenced code, such as a build prompt, are not
 # read. What a section says is not checked, only that it is there. A
@@ -172,6 +176,7 @@ jobs:
               done()
 
           ID = re.compile(r"[A-Z][A-Z0-9]{0,7}-\d{1,5}[a-z]?")
+          DECISION = re.compile(r"[A-Za-z][A-Za-z0-9-]*-D\d+")
           NUM = re.compile(r"\d+(?:\.\d+)?")
           STATES = ("not_started", "in_progress", "in_review", "blocked", "done")
           rows = []
@@ -201,10 +206,17 @@ jobs:
               dep = r["Depends on"]
               if dep != "–":
                   parts = [p.strip() for p in dep.split(",")]
-                  bad = [p for p in parts if p not in ids]
+                  own = {i.split("-")[0] for i in ids}
+                  def ok(p):
+                      if p in ids or DECISION.fullmatch(p):
+                          return True
+                      return bool(ID.fullmatch(p)) and p.split("-")[0] not in own
+                  bad = [p for p in parts if not ok(p)]
                   if not dep or bad:
                       shown = ", ".join(f"'{b}'" for b in bad) if dep else "blank"
-                      err(line, f"Depends on for {wp} must be – or IDs from this table. {shown} is not.")
+                      err(line, f"Depends on for {wp} must be –, or package IDs and decisions such as pollen-D1. "
+                                f"{shown} is not. This project's IDs must be in the table, and anything else, "
+                                "such as a pull request, goes in the package's section.")
 
           # One package section per row, after Risks, in table order, each
           # with the five fields in order.
