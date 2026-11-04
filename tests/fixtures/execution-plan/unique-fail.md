@@ -1,6 +1,16 @@
-# Execution plan
+# Execution plan: stinger
 
-Intro prose.
+## Goal
+
+Text about goal.
+
+## Plan
+
+Text about plan.
+
+## Costing
+
+Text about costing.
 
 ## Work packages
 
@@ -10,14 +20,79 @@ Intro prose.
 | ST-1 | Approvals are logged | – | stinger chat | Fable 5.1 | 2 | 2 | /audit shows the approval | in_progress |
 | ST-3 | Release notes | ST-1 | operator | – | 0.5 | 0 | notes on the release | done |
 
-### ST-1. The admin list
+## Plan coverage
 
-Build prompt:
+Text about plan coverage.
 
-    do it
+## Goal coverage
+
+Text about goal coverage.
+
+## Route to prod
+
+Text about route to prod.
+
+## Dependencies outside this project
+
+Text about dependencies outside this project.
+
+## Decisions
+
+Text about decisions.
 
 ## Risks
 
-| ID | Note |
+| Risk | Package |
 |---|---|
-| x | not the work packages table |
+| the gate moves | ST-1 |
+
+### ST-1. The admin list reads from the shared gate
+
+**Why this model:** something for ST-1.
+
+**Depends on:** something for ST-1.
+
+**Gate on dev:** something for ST-1.
+
+**Done when:** something for ST-1.
+
+**Build prompt:**
+
+```text
+You are building ST-1.
+## Not a section heading
+```
+
+### ST-1. Approvals are logged
+
+**Why this model:** something for ST-1.
+
+**Depends on:** something for ST-1.
+
+**Gate on dev:** something for ST-1.
+
+**Done when:** something for ST-1.
+
+**Build prompt:**
+
+```text
+You are building ST-1.
+## Not a section heading
+```
+
+### ST-3. Release notes
+
+**Why this model:** something for ST-3.
+
+**Depends on:** something for ST-3.
+
+**Gate on dev:** something for ST-3.
+
+**Done when:** something for ST-3.
+
+**Build prompt:**
+
+```text
+You are building ST-3.
+## Not a section heading
+```

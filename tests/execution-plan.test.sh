@@ -4,7 +4,9 @@
 # (orchestrator standards/execution-plan.md, operator, 4 Nov 2026). The
 # workflow's own steps are lifted out of the YAML and run here, so the test
 # runs the code the runner runs. Each rule has one passing and one failing
-# fixture under tests/fixtures/execution-plan/.
+# fixture under tests/fixtures/execution-plan/, covering both the Work
+# packages table and the required composition (standard at orchestrator
+# a6208b6).
 #
 #   bash tests/execution-plan.test.sh
 set -u
@@ -46,19 +48,29 @@ case "$(q .if)" in *"github.event_name == 'pull_request'"*) pass "runs on pull r
 [ "$(q .check_shell)" = '"python3 {0}"' ] && pass "the check is inline Python" || fail "shell" "$(q .check_shell)"
 
 # The rules, one passing and one failing fixture each. A failing fixture
-# must fail with errors about its own rule only.
+# must fail with errors about its own rule only. The fixtures are whole
+# plans in the required composition, so each breaks exactly one rule.
 declare -A KEY=(
-  [heading]="no '## Work packages' heading"
+  [heading]="There is no '## Work packages' heading"
   [header]="header row"
   [id]="is not a valid ID"
   [unique]="more than once"
   [numbers]="must be a number"
   [state]="State"
-  [depends]="Depends on"
+  [depends]="Depends on for"
+  [title]="# Execution plan: <project>"
+  [sections]="There is no '## "
+  [order]="is out of order. The sections run"
+  [packages]="package sections are out of order"
+  [packages-missing]="has no '### "
+  [fields]="section has no"
+  [fields-order]="fields in the"
 )
-for rule in heading header id unique numbers state depends; do
+for rule in heading header id unique numbers state depends title sections order packages fields; do
   out=$(PLAN="$FX/$rule-pass.md" python3 "$T/check.py" 2>&1); rc=$?
   [ $rc = 0 ] && pass "$rule: passing fixture passes" || fail "$rule: passing fixture" "exit $rc: $out"
+done
+for rule in "${!KEY[@]}"; do
   out=$(PLAN="$FX/$rule-fail.md" python3 "$T/check.py" 2>&1); rc=$?
   errs=$(printf '%s\n' "$out" | grep '^::error ' || true)
   other=$(printf '%s\n' "$errs" | grep -vF -- "${KEY[$rule]}" || true)
@@ -71,7 +83,7 @@ done
 
 # Errors carry the file and the line, so GitHub annotates the plan.
 out=$(PLAN="$FX/state-fail.md" python3 "$T/check.py" 2>&1)
-case "$out" in *"::error file=$FX/state-fail.md,line=9,"*) pass "errors name the file and line";; *) fail "annotation" "$out";; esac
+case "$out" in *"::error file=$FX/state-fail.md,line=19,"*) pass "errors name the file and line";; *) fail "annotation" "$out";; esac
 
 # Change detection, run against a merge commit like the one a pull_request
 # run checks out: first parent is the base tip, second the PR head.
