@@ -1,0 +1,251 @@
+# Fails a pull request that changes docs/execution-plan.md while the plan is
+# not in the standard composition, or its Work packages table is not in the
+# standard shape, so hive's Programme page can read every project's work
+# packages. The standard is the operator's decisions of 4 Nov 2026, written
+# up in the orchestrator repository at standards/execution-plan.md (a6208b6).
+# The rules are copied into the check below, so it never needs that
+# checkout. The composition:
+#
+#   - the first line is `# Execution plan: <project>`
+#   - then these headings, in this order, none left out: Goal, Plan,
+#     Costing, Work packages, Plan coverage, Goal coverage, Route to prod,
+#     Dependencies outside this project, Decisions, Risks, and no other
+#     `## ` section. Anything else goes in a package section or under Risks.
+#   - after Risks, one `### <ID>. <outcome>` section per package, in table
+#     order, each with Why this model, Depends on, Gate on dev, Done when and
+#     Build prompt as labelled fields, in that order
+#
+# The table:
+#
+#   - a `## Work packages` heading, with a table under it
+#   - the header row starts with ID, Outcome, Depends on, Owner, Model, Hours,
+#     Tokens (M), Gate on dev, State, in that order, and may end with Phase
+#   - every ID matches ^[A-Z][A-Z0-9]{0,7}-\d{1,5}[a-z]?$ and is unique
+#   - Hours and Tokens (M) are plain numbers, never blank
+#   - State is not_started, in_progress, in_review, blocked or done
+#   - Depends on is –, or a comma-separated list of package IDs and
+#     operator decisions written <prefix>-D<n>, such as pollen-D1. A package
+#     ID with one of this table's prefixes must be in the table. Another
+#     project's, such as AC-25, is allowed (standard at 0557b1e). A pull
+#     request or any other reference goes in the package's section.
+#
+# Headings and labels inside fenced code, such as a build prompt, are not
+# read. What a section says is not checked, only that it is there. A
+# pull request that does not touch the plan passes without reading it, so
+# the check can be made required later without blocking unrelated work.
+# Whether it is required is the operator's call, not this file's.
+#
+# The plan is read as a file and nothing in it runs. The token is
+# contents: read and is not left in the checkout. A caller is the whole
+# per-repo file:
+#
+#   name: execution-plan
+#   on:
+#     pull_request:
+#       types: [opened, reopened, synchronize, ready_for_review]
+#   permissions:
+#     contents: read
+#   jobs:
+#     plan:
+#       uses: BeeSec-UK/.github/.github/workflows/execution-plan.yml@main
+#
+# Tests: bash tests/execution-plan.test.sh
+name: execution-plan
+
+on:
+  workflow_call:
+
+permissions: {}
+
+jobs:
+  plan:
+    runs-on: beesec-preflight
+    timeout-minutes: 3
+    if: github.event_name == 'pull_request' && !github.event.pull_request.draft
+    permissions:
+      contents: read
+    steps:
+      # Depth 2 brings both parents of the merge commit a pull_request run
+      # checks out, so the PR's changes are HEAD^1..HEAD with no further fetch.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Did the pull request change the plan
+        id: changed
+        shell: bash
+        run: |
+          set -uo pipefail
+          # Exit 1 is a change. Any other failure, such as a missing parent,
+          # also counts as changed, so the check runs rather than being skipped.
+          if git diff --quiet HEAD^1 HEAD -- docs/execution-plan.md; then
+            echo plan=false >> "$GITHUB_OUTPUT"
+            echo "docs/execution-plan.md is unchanged, nothing to check."
+          else
+            echo plan=true >> "$GITHUB_OUTPUT"
+          fi
+      - name: Work packages table
+        id: check
+        if: steps.changed.outputs.plan == 'true'
+        shell: python3 {0}
+        run: |
+          import os, re, sys
+          path = os.environ.get("PLAN", "docs/execution-plan.md")
+          if not os.path.exists(path):
+              print(f"{path} was removed, so there is no plan to check.")
+              sys.exit(0)
+          raw = open(path, encoding="utf-8").read().splitlines()
+          # Lines inside fenced code are blanked, so a build prompt's own
+          # headings and labels are never read as the plan's.
+          lines, fence = [], None
+          for l in raw:
+              m = re.match(r"[ \t]*(`{3,}|~{3,})", l)
+              if fence:
+                  if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence):
+                      fence = None
+                  lines.append("")
+              elif m:
+                  fence = m.group(1)
+                  lines.append("")
+              else:
+                  lines.append(l)
+          errors = []
+          def err(line, msg):
+              errors.append((line, msg))
+          def done():
+              for line, msg in errors:
+                  loc = f",line={line}" if line else ""
+                  print(f"::error file={path}{loc},title=Execution plan::{msg}")
+              if errors:
+                  print(f"{len(errors)} problem(s). The standard is orchestrator standards/execution-plan.md.")
+                  sys.exit(1)
+              print("The plan has the required composition and its Work packages table is in the standard shape.")
+              sys.exit(0)
+          def cells(row):
+              row = row.strip()
+              row = row[1:] if row.startswith("|") else row
+              row = row[:-1] if row.endswith("|") and not row.endswith("\\|") else row
+              return [c.strip().replace("\\|", "|") for c in re.split(r"(?<!\\)\|", row)]
+
+          # The composition: the title, then the ten sections in order.
+          SECTIONS = ["Goal", "Plan", "Costing", "Work packages", "Plan coverage", "Goal coverage",
+                      "Route to prod", "Dependencies outside this project", "Decisions", "Risks"]
+          first = next((i for i, l in enumerate(lines) if l.strip()), None)
+          if first is None or not re.fullmatch(r"# Execution plan: \S.*", lines[first].rstrip()):
+              err((first or 0) + 1, "The first line must be '# Execution plan: <project>'.")
+          h2 = [(i, re.fullmatch(r"##[ \t]+(.*?)[ \t]*", l).group(1)) for i, l in enumerate(lines)
+                if re.fullmatch(r"##[ \t]+(.*?)[ \t]*", l)]
+          at = {}
+          for i, name in h2:
+              at.setdefault(name, i)
+          for name in SECTIONS:
+              if name not in at:
+                  err(0, f"There is no '## {name}' heading. Every plan has these sections in this order: "
+                         + ", ".join(SECTIONS) + ". A section with nothing to say says None and why.")
+          for i, name in h2:
+              if name not in SECTIONS:
+                  err(i + 1, f"'## {name}' is not one of the ten sections. Move it into a package section or under Risks.")
+          present = [n for n in SECTIONS if n in at]
+          for prev, name in zip(present, present[1:]):
+              if at[name] < at[prev]:
+                  err(at[name] + 1, f"'## {name}' is out of order. The sections run " + ", ".join(SECTIONS) + ".")
+
+          start = at.get("Work packages")
+          if start is None:
+              done()
+          table, i = [], start + 1
+          while i < len(lines) and not lines[i].startswith("## "):
+              if lines[i].lstrip().startswith("|"):
+                  while i < len(lines) and lines[i].lstrip().startswith("|"):
+                      table.append((i + 1, lines[i])); i += 1
+                  break
+              i += 1
+          if len(table) < 2:
+              err(start + 1, "There is no table under '## Work packages'.")
+              done()
+
+          COLS = ["ID", "Outcome", "Depends on", "Owner", "Model", "Hours", "Tokens (M)", "Gate on dev", "State"]
+          (hline, hrow), (sline, srow) = table[0], table[1]
+          header = cells(hrow)
+          if header[:9] != COLS or header[9:] not in ([], ["Phase"]):
+              err(hline, "The header row must be | " + " | ".join(COLS) + " |, optionally followed by | Phase |. "
+                         "It is | " + " | ".join(header) + " |.")
+              done()
+          if not all(re.fullmatch(r":?-{3,}:?", c) for c in cells(srow)):
+              err(sline, "The header row must be followed by a |---| separator row.")
+              done()
+
+          ID = re.compile(r"[A-Z][A-Z0-9]{0,7}-\d{1,5}[a-z]?")
+          DECISION = re.compile(r"[A-Za-z][A-Za-z0-9-]*-D\d+")
+          NUM = re.compile(r"\d+(?:\.\d+)?")
+          STATES = ("not_started", "in_progress", "in_review", "blocked", "done")
+          rows = []
+          for line, raw in table[2:]:
+              c = cells(raw)
+              if len(c) != len(header):
+                  err(line, f"This row has {len(c)} cells, and the header has {len(header)}.")
+                  continue
+              rows.append((line, dict(zip(header, c))))
+          seen = {}
+          for line, r in rows:
+              wp = r["ID"]
+              if not ID.fullmatch(wp):
+                  err(line, f"'{wp}' is not a valid ID. Use a prefix of up to eight capitals, a hyphen and a number, such as ST-1 or RS-22b.")
+              if wp in seen:
+                  err(line, f"{wp} is used more than once, first on line {seen[wp]}.")
+              seen.setdefault(wp, line)
+          ids = set(seen)
+          for line, r in rows:
+              wp = r["ID"]
+              for col in ("Hours", "Tokens (M)"):
+                  if not NUM.fullmatch(r[col]):
+                      shown = f"'{r[col]}'" if r[col] else "blank"
+                      err(line, f"{col} on {wp} must be a number, and is {shown}.")
+              if r["State"] not in STATES:
+                  err(line, f"State '{r['State']}' on {wp} is not one of " + ", ".join(STATES) + ".")
+              dep = r["Depends on"]
+              if dep != "–":
+                  parts = [p.strip() for p in dep.split(",")]
+                  own = {i.split("-")[0] for i in ids}
+                  def ok(p):
+                      if p in ids or DECISION.fullmatch(p):
+                          return True
+                      return bool(ID.fullmatch(p)) and p.split("-")[0] not in own
+                  bad = [p for p in parts if not ok(p)]
+                  if not dep or bad:
+                      shown = ", ".join(f"'{b}'" for b in bad) if dep else "blank"
+                      err(line, f"Depends on for {wp} must be –, or package IDs and decisions such as pollen-D1. "
+                                f"{shown} is not. This project's IDs must be in the table, and anything else, "
+                                "such as a pull request, goes in the package's section.")
+
+          # One package section per row, after Risks, in table order, each
+          # with the five fields in order.
+          FIELDS = ["Why this model", "Depends on", "Gate on dev", "Done when", "Build prompt"]
+          after = at.get("Risks", start)
+          heads = [(i, m.group(1)) for i, l in enumerate(lines) if i > after
+                   for m in [re.match(r"###[ \t]+(\S+?)\.[ \t]+\S", l)] if m]
+          want = [r["ID"] for _, r in rows]
+          got = [wp for _, wp in heads]
+          for wp in want:
+              if wp not in got:
+                  err(0, f"{wp} has no '### {wp}. <outcome>' section after '## Risks'.")
+          for i, wp in heads:
+              if wp not in ids:
+                  err(i + 1, f"'### {wp}.' is not a package in the Work packages table.")
+          common = [wp for wp in got if wp in want]
+          if common != [wp for wp in want if wp in got]:
+              err(heads[0][0] + 1, "The package sections are out of order. They follow the table: " + ", ".join(want) + ".")
+          for n, (i, wp) in enumerate(heads):
+              end = next((j for j in range(i + 1, len(lines)) if re.match(r"#{1,3}[ \t]", lines[j])), len(lines))
+              pos = {}
+              for j in range(i + 1, end):
+                  for f in FIELDS:
+                      if f not in pos and re.match(r"[ \t]*(\*\*)?" + re.escape(f) + r"(:\*\*|\*\*:?|:)", lines[j]):
+                          pos[f] = j
+              for f in FIELDS:
+                  if f not in pos:
+                      err(i + 1, f"The {wp} section has no **{f}** field.")
+              seen_f = [f for f in FIELDS if f in pos]
+              if [f for f in sorted(pos, key=pos.get)] != seen_f:
+                  err(i + 1, f"The fields in the {wp} section are out of order. They run " + ", ".join(FIELDS) + ".")
+          done()
