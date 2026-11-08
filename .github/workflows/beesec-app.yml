@@ -275,7 +275,11 @@ on:
           while it can mint a token. And no workflow in that repo calls
           this one from a job holding id-token: write, because a push run's
           gate restores the GitHub cache that a ref run's branch code could
-          have written.
+          have written. For the same reason the job calling this one grants
+          contents: read only, plus checks: read where trust_pr_gate is
+          used: a push run's gate keeps its checkout credentials, so a
+          poisoned cache entry would get the GITHUB_TOKEN with whatever
+          that job grants.
           A ref run saves no GitHub cache, because it runs in main's cache
           scope, but the branch's code can still read the runner's cache
           token and write main's cache itself. So a job that deploys must
@@ -320,12 +324,11 @@ jobs:
   # variable RUNNER_STATUS_APP_ID, org secret RUNNER_STATUS_APP_KEY, reaching
   # here through the caller's `secrets: inherit`. RUNNER_STATUS_TOKEN was
   # read before but never existed, so every pick got 403. Every failure, a
-  # missing app, a 403, a
-  # network blip, falls back to `runner`, so runner status can slow a run
-  # down by twenty seconds and never stops one. The target step can stop
-  # a run, but only when ref is set, and then only when it refuses ref or
-  # its lookup fails. The status is read at the
-  # repo AND the org, because a workstation may be registered at either.
+  # missing app, a 403, a network blip, falls back to `runner`, so runner
+  # status can slow a run down by twenty seconds and never stops one. The
+  # target step can stop a run, but only when ref is set, and then only
+  # when it refuses ref or its lookup fails. The status is read at the repo
+  # AND the org, because a workstation may be registered at either.
   pick:
     name: Pick a runner
     runs-on: ${{ fromJSON(inputs.runner) }}
