@@ -40,17 +40,35 @@ json.dump(caches, open(sys.argv[2] + "/caches.json", "w"))
 EOF
 
 # A stub curl on PATH: branch main, lightweight tag v1, annotated tag v2.
+# It honours -o and -w '%{http_code}' as curl does. STUB_CURL=down makes
+# it fail as curl does on a network error, STUB_CURL=401 answers every
+# lookup with Bad credentials, STUB_CURL=junk with a 200 that is not JSON.
 mkdir -p "$T/bin"
 cat > "$T/bin/curl" <<'EOF'
 #!/usr/bin/env bash
-for a in "$@"; do url=$a; done
-case "$url" in
-  */git/ref/heads/main) echo '{"object":{"type":"commit","sha":"0123456789abcdef0123456789abcdef01234567"}}' ;;
-  */git/ref/tags/v1)    echo '{"object":{"type":"commit","sha":"1111111111111111111111111111111111111111"}}' ;;
-  */git/ref/tags/v2)    echo '{"object":{"type":"tag","sha":"7777777777777777777777777777777777777777"}}' ;;
-  */git/tags/7777777777777777777777777777777777777777) echo '{"object":{"type":"commit","sha":"2222222222222222222222222222222222222222"}}' ;;
-  *) echo '{"message":"Not Found"}' ;;
+out=/dev/stdout; fmt=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out=$2; shift ;;
+    -w) fmt=$2; shift ;;
+    *) url=$1 ;;
+  esac
+  shift
+done
+if [ "${STUB_CURL:-}" = down ]; then echo "curl: (6) Could not resolve host" >&2; exit 6; fi
+code=200
+case "${STUB_CURL:-}:$url" in
+  401:*) code=401; body='{"message":"Bad credentials"}' ;;
+  junk:*) body='<html>oops</html>' ;;
+  :*/git/ref/heads/main) body='{"object":{"type":"commit","sha":"0123456789abcdef0123456789abcdef01234567"}}' ;;
+  :*/git/ref/tags/v1)    body='{"object":{"type":"commit","sha":"1111111111111111111111111111111111111111"}}' ;;
+  :*/git/ref/tags/v2)    body='{"object":{"type":"tag","sha":"7777777777777777777777777777777777777777"}}' ;;
+  :*/git/tags/7777777777777777777777777777777777777777) body='{"object":{"type":"commit","sha":"2222222222222222222222222222222222222222"}}' ;;
+  *) code=404; body='{"message":"Not Found"}' ;;
 esac
+printf '%s' "$body" > "$out"
+[ -n "$fmt" ] && printf '%s' "$code"
+exit 0
 EOF
 chmod +x "$T/bin/curl"
 
@@ -106,6 +124,17 @@ run_target v1 && grep -qx 'ref_sha=1111111111111111111111111111111111111111' "$T
 run_target v2 && grep -qx 'ref_sha=2222222222222222222222222222222222222222' "$T/out" \
   && pass "an annotated tag resolves to the commit it tags" || fail "an annotated tag resolves to the commit it tags" "$(cat "$T/log")"
 refused "an unknown ref is refused" 'is not a branch or tag of' nosuchbranch
+# A failed lookup is not an answer. It must say so, not report the ref as
+# missing, and still fail closed.
+refused "a network failure says the lookup failed" 'could not look up' main STUB_CURL=down
+refused "an API error says the lookup failed" 'could not look up .*HTTP 401' main STUB_CURL=401
+refused "a 200 that is not JSON fails closed" '' main STUB_CURL=junk
+for c in down 401 junk; do
+  run_target main STUB_CURL=$c
+  grep -q 'is not a branch or tag' "$T/log" \
+    && fail "STUB_CURL=$c is not reported as a missing ref" "$(cat "$T/log")" \
+    || pass "STUB_CURL=$c is not reported as a missing ref"
+done
 
 # --- the tested commit is reported --------------------------------------------
 
@@ -119,7 +148,10 @@ grep -q '0123456789abcdef0123456789abcdef01234567' "$T/summary" && grep -q 'ffff
 run_target main && grep -qx 'ref_sha=0123456789abcdef0123456789abcdef01234567' "$T/out" \
   && pass "a branch name resolves to its commit" || fail "a branch name resolves to its commit" "$(cat "$T/log")"
 
-for bad in $'main\nx y' $'main\n::warning::x' $'ok\n..' 'a..b' '-x' ''; do
+# The rest are names git itself refuses (git check-ref-format), which the
+# lookup would only 404 on.
+for bad in $'main\nx y' $'main\n::warning::x' $'ok\n..' 'a..b' '-x' '' \
+           'x.lock' 'a/x.lock' 'a.lock/b' 'a/' 'a//b' 'a.' 'a/.b'; do
   [ -z "$bad" ] && continue
   if run_target "$bad"; then
     fail "ref $(printf '%q' "$bad") is refused" "accepted: $(cat "$T/out")"
