@@ -90,7 +90,7 @@ mkrepo() {
 commit() { git -C "$R" add -A; git -C "$R" commit -qm pr; }
 # run <name> <expect rc> <event> <base> <patterns>
 run() {
-  out=$(cd "$R" && EVENT="$3" BASE="$4" PATTERNS="$5" bash "$T/scrub.sh" 2>&1); rc=$?
+  out=$(cd "$R" && RUNNER_TEMP="$T" EVENT="$3" BASE="$4" PATTERNS="$5" bash "$T/scrub.sh" 2>&1); rc=$?
   if [ "$rc" = "$2" ]; then pass "$1"; else fail "$1" "rc=$rc, expected $2: $(printf '%s' "$out" | head -3 | tr '\n' ' ')"; fi
 }
 says()    { case "$out" in *"$2"*) pass "$1" ;; *) fail "$1" "output lacks '$2': $(printf '%s' "$out" | head -3 | tr '\n' ' ')" ;; esac; }

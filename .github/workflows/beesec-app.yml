@@ -239,26 +239,6 @@ on:
         type: string
         default: ''
 
-      security_checks:
-        description: >-
-          Run the security checks of docs/security-gate-plan.md as steps in
-          the gate: today the client-data scrub and the dependency and
-          licence check. When the gate is skipped, the scrub runs in pick
-          instead and the dependency check does not run, because the gate is
-          skipped only when neither half changed or when the same tree
-          already passed it on its PR. Off by default while their cost is
-          measured.
-        type: boolean
-        default: false
-
-      security_enforce:
-        description: >-
-          Let a security check fail the run. Off, each check reports its
-          findings as annotations and the run carries on, for the week in
-          shadow before enforcement. Has no effect without security_checks.
-        type: boolean
-        default: false
-
       ref:
         description: >-
           A branch or tag of this repo for a manual run to test instead of main,
@@ -313,6 +293,26 @@ on:
           a same-repo pull request run already could.
         type: string
         default: ''
+
+      security_checks:
+        description: >-
+          Run the security checks of docs/security-gate-plan.md as steps in
+          the gate: today the client-data scrub and the dependency and
+          licence check. When the gate is skipped, the scrub runs in pick
+          instead and the dependency check does not run, because the gate is
+          skipped only when neither half changed or when the same tree
+          already passed it on its PR. Off by default while their cost is
+          measured.
+        type: boolean
+        default: false
+
+      security_enforce:
+        description: >-
+          Let a security check fail the run. Off, each check reports its
+          findings as annotations and the run carries on, for the week in
+          shadow before enforcement. Has no effect without security_checks.
+        type: boolean
+        default: false
 
     outputs:
       # For a caller that keeps its own deploy jobs (propolis, apiary): the
@@ -725,7 +725,7 @@ jobs:
           # claude-project-setup bin/beesec, and tests/scrub.test.sh fails if the
           # two drift apart.
           PRIVATE_SHAPED='_private/|findings-brain\.json|\.pem$|\.key$|id_rsa|secrets\.md'
-          list=$(mktemp); trap 'rm -f "$list"' EXIT
+          list=$(mktemp -p "$RUNNER_TEMP"); trap 'rm -f "$list"' EXIT
           # One fixed string per line. CR and surrounding blanks are stripped, and a
           # blank line is dropped, because an empty fixed string matches every line.
           printf '%s\n' "${PATTERNS:-}" | tr -d '\r' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -v '^$' > "$list" || true
@@ -947,7 +947,7 @@ jobs:
           # claude-project-setup bin/beesec, and tests/scrub.test.sh fails if the
           # two drift apart.
           PRIVATE_SHAPED='_private/|findings-brain\.json|\.pem$|\.key$|id_rsa|secrets\.md'
-          list=$(mktemp); trap 'rm -f "$list"' EXIT
+          list=$(mktemp -p "$RUNNER_TEMP"); trap 'rm -f "$list"' EXIT
           # One fixed string per line. CR and surrounding blanks are stripped, and a
           # blank line is dropped, because an empty fixed string matches every line.
           printf '%s\n' "${PATTERNS:-}" | tr -d '\r' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -v '^$' > "$list" || true
