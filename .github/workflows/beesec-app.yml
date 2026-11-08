@@ -703,10 +703,12 @@ jobs:
       # Client-data scrub, check 5 of docs/security-gate-plan.md. Fails on a
       # path `beesec pr` would refuse, and on a line naming a client from the
       # org secret CLIENT_SCRUB_PATTERNS, which this public repository cannot
-      # hold. On a PR it reads only what the PR adds; elsewhere the whole
-      # tree. It prints file and line, never the text. Off unless the caller
-      # sets security_checks, and reports without failing until
-      # security_enforce (the week in shadow, decision C).
+      # hold. On a PR it reads <merge-base>..<head>, on a push
+      # <merge-base>..<sha> from the push's before, or paths only when there
+      # is no usable before, and on any other event the whole tree. It prints
+      # file and line, never the text. Off unless the caller sets
+      # security_checks, and reports without failing until security_enforce
+      # (the week in shadow, decision C).
       - name: Client-data scrub
         id: scrub
         if: inputs.security_checks && steps.scope.outputs.tests != 'true'
@@ -714,82 +716,143 @@ jobs:
         env:
           EVENT: ${{ github.event_name }}
           BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BEFORE: ${{ github.event.before }}
+          SHA: ${{ github.sha }}
           PATTERNS: ${{ secrets.CLIENT_SCRUB_PATTERNS }}
         run: |
           set -euo pipefail
           # The path shape `beesec pr` refuses, copied verbatim from
-          # claude-project-setup bin/beesec, and tests/scrub.test.sh fails if the
-          # two drift apart.
+          # claude-project-setup bin/beesec. That repository is private, so CI cannot
+          # read it: tests/scrub.test.sh compares the two on a machine that has the
+          # CLI and skips the comparison in CI, so a drift is caught by hand.
           PRIVATE_SHAPED='_private/|findings-brain\.json|\.pem$|\.key$|id_rsa|secrets\.md'
           list=$(mktemp -p "$RUNNER_TEMP"); trap 'rm -f "$list"' EXIT
           # One fixed string per line. CR and surrounding blanks are stripped, and a
           # blank line is dropped, because an empty fixed string matches every line.
           printf '%s\n' "${PATTERNS:-}" | tr -d '\r' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -v '^$' > "$list" || true
-          if [ ! -s "$list" ]; then
-            echo "::error::CLIENT_SCRUB_PATTERNS is not set, so the scrub has nothing to look for. Is the caller passing secrets: inherit?"
-            exit 1
-          fi
           git() { command git -c core.quotePath=false "$@"; }
           hits=0
 
-          if [ "$EVENT" = pull_request ]; then
-            case "${BASE:-}" in
-              *[!0-9a-f]*|"") echo "::error::no usable PR base in the event"; exit 1 ;;
-            esac
-            [ "${#BASE}" = 40 ] || { echo "::error::no usable PR base in the event"; exit 1; }
-            git fetch -q --no-tags --depth=1 origin "$BASE" || { echo "::error::could not fetch the PR base $BASE"; exit 1; }
-            paths=$(git diff --name-only --no-renames --diff-filter=d "$BASE" HEAD)
-          else
-            paths=$(git ls-files)
-          fi
-
-          while IFS= read -r f; do
-            [ -n "$f" ] || continue
-            echo "::error file=$f::private-shaped path in the change: $f"
+          # A path goes into annotation properties, which end at "," and "::" and
+          # cannot hold a line break, so it is percent-encoded there. The message
+          # after "::" needs only %, CR and LF encoded.
+          msg() { local s=$1; s=${s//'%'/%25}; s=${s//$'\r'/%0D}; s=${s//$'\n'/%0A}; printf '%s' "$s"; }
+          prop() { local s; s=$(msg "$1"); s=${s//:/%3A}; s=${s//,/%2C}; printf '%s' "$s"; }
+          annotate() {
+            echo "::error file=$(prop "$1"),line=$2::a line names a client from CLIENT_SCRUB_PATTERNS: $(msg "$1"):$2"
             hits=$((hits + 1))
-          done < <(printf '%s\n' "$paths" | grep -E "$PRIVATE_SHAPED" || true)
+          }
+
+          sha_ok() {
+            case "$1" in *[!0-9a-f]*|"") return 1 ;; esac
+            [ "${#1}" = 40 ] && [ "$1" != 0000000000000000000000000000000000000000 ]
+          }
+          fetch_commit() { git cat-file -e "$1^{commit}" 2>/dev/null || git fetch -q --no-tags --depth=1 origin "$1"; }
+          # The merge base of two commits, deepening a shallow checkout 50 commits at
+          # a time for up to 20 rounds, then fetching full history once (plan section 1).
+          merge_base() {
+            local i
+            for i in $(seq 20); do
+              git merge-base "$1" "$2" 2>/dev/null && return 0
+              [ "$(git rev-parse --is-shallow-repository)" = true ] || return 1
+              git fetch -q --no-tags --deepen=50 origin "$1" "$2" || return 1
+            done
+            git merge-base "$1" "$2" 2>/dev/null && return 0
+            git fetch -q --no-tags --unshallow origin "$1" "$2" || return 1
+            git merge-base "$1" "$2"
+          }
+
+          # What is read: <merge-base>..<head> on a PR, so main's commits reached
+          # through GitHub's merge commit are not counted, and <merge-base>..<sha> on
+          # a push. A push with no usable before, a new branch or a force push, has
+          # nothing to diff against, so only the tree's paths are checked. Any other
+          # event reads the whole tree.
+          mode=tree
+          case "$EVENT" in
+            pull_request)
+              if ! sha_ok "${BASE:-}" || ! sha_ok "${HEAD_SHA:-}"; then
+                echo "::error::no usable PR base or head in the event"; exit 1
+              fi
+              if ! fetch_commit "$BASE" || ! fetch_commit "$HEAD_SHA"; then
+                echo "::error::could not fetch the PR base $BASE or head $HEAD_SHA"; exit 1
+              fi
+              from=$(merge_base "$BASE" "$HEAD_SHA") || { echo "::error::no merge base between the PR base and head"; exit 1; }
+              to=$HEAD_SHA; mode=diff ;;
+            push)
+              if sha_ok "${BEFORE:-}" && sha_ok "${SHA:-}" && fetch_commit "$BEFORE" 2>/dev/null && fetch_commit "$SHA" \
+                  && from=$(merge_base "$BEFORE" "$SHA"); then
+                to=$SHA; mode=diff
+              else
+                mode=paths
+                echo "::notice::client-data scrub: content half skipped, because this push has no usable github.event.before. Only paths were checked."
+              fi ;;
+          esac
+
+          if [ "$mode" = diff ]; then
+            names=(git diff --name-only -z --no-renames --diff-filter=d "$from" "$to")
+          else
+            names=(git ls-files -z)
+          fi
+          while IFS= read -r -d '' f; do
+            [[ $f =~ $PRIVATE_SHAPED ]] || continue
+            echo "::error file=$(prop "$f")::private-shaped path in the change: $(msg "$f")"
+            hits=$((hits + 1))
+          done < <("${names[@]}")
+
+          # The path half needs no list, so it has run before this, as on a
+          # Dependabot or fork PR, which gets no secret.
+          if [ ! -s "$list" ]; then
+            echo "::error::CLIENT_SCRUB_PATTERNS is not set, so the scrub has nothing to look for. Is the caller passing secrets: inherit? Paths were checked, $hits hit(s)."
+            exit 1
+          fi
 
           # Content. Only file and line number are ever printed, never the line or
           # the pattern, so a hit does not copy client data into the log.
-          if [ "$EVENT" = pull_request ]; then
-            # The lines the PR adds. The hunk header gives each added line's number
-            # in the new file, and the counts say where a hunk ends, so an added
-            # line that itself starts with "++" is not taken for a file header.
-            found=$(git diff -U0 --no-renames --no-color --no-ext-diff "$BASE" HEAD | awk '
-              FNR == NR { p[++n] = tolower($0); next }
-              remold > 0 || remnew > 0 {
-                c = substr($0, 1, 1)
-                if (c == "+") {
-                  l = tolower(substr($0, 2))
-                  for (i = 1; i <= n; i++) if (index(l, p[i])) { print file ":" ln; break }
-                  ln++; remnew--
-                } else if (c == "-") remold--
-                else if (c == " ") { ln++; remold--; remnew-- }
-                next
-              }
-              /^\+\+\+ / { file = substr($0, 5); sub(/\t$/, "", file); sub(/^b\//, "", file); next }
-              /^@@ / {
-                split($2, o, ","); split($3, nw, ",")
-                remold = (2 in o) ? o[2] + 0 : 1
-                remnew = (2 in nw) ? nw[2] + 0 : 1
-                ln = substr(nw[1], 2) + 0
-              }' "$list" -)
-          else
-            found=$({ git grep -I -n -i -F -f "$list" -z -- . || true; } | while IFS= read -r -d '' f && IFS= read -r -d '' n && IFS= read -r _; do
-              printf '%s:%s\n' "$f" "$n"
-            done)
-          fi
-          while IFS= read -r at; do
-            [ -n "$at" ] || continue
-            echo "::error file=${at%:*},line=${at##*:}::a line names a client from CLIENT_SCRUB_PATTERNS: $at"
-            hits=$((hits + 1))
-          done <<< "$found"
+          case "$mode" in
+            diff)
+              # The lines the range adds. The hunk header gives each added line's
+              # number in the new file, and the counts say where a hunk ends, so an
+              # added line that itself starts with "++" is not taken for a file header.
+              while IFS= read -r at; do
+                [ -n "$at" ] || continue
+                annotate "${at%:*}" "${at##*:}"
+              done < <(git diff -U0 --no-renames --no-color --no-ext-diff "$from" "$to" | awk '
+                FNR == NR { p[++n] = tolower($0); next }
+                remold > 0 || remnew > 0 {
+                  c = substr($0, 1, 1)
+                  if (c == "+") {
+                    l = tolower(substr($0, 2))
+                    for (i = 1; i <= n; i++) if (index(l, p[i])) { print file ":" ln; break }
+                    ln++; remnew--
+                  } else if (c == "-") remold--
+                  else if (c == " ") { ln++; remold--; remnew-- }
+                  next
+                }
+                /^\+\+\+ / { file = substr($0, 5); sub(/\t$/, "", file); sub(/^b\//, "", file); next }
+                /^@@ / {
+                  split($2, o, ","); split($3, nw, ",")
+                  remold = (2 in o) ? o[2] + 0 : 1
+                  remnew = (2 in nw) ? nw[2] + 0 : 1
+                  ln = substr(nw[1], 2) + 0
+                }' "$list" -)
+              ;;
+            tree)
+              while IFS= read -r -d '' f && IFS= read -r -d '' n && IFS= read -r _; do
+                annotate "$f" "$n"
+              done < <(git grep -I -n -i -F -f "$list" -z -- . || true)
+              ;;
+          esac
 
           if [ "$hits" -gt 0 ]; then
             echo "::error::client-data scrub: $hits hit(s). Client data has no place in an app repository, so there is no inline override. A false match is fixed in the pattern list, which the operator owns."
             exit 1
           fi
-          echo "client-data scrub: no private-shaped path and no client named, $(wc -l < "$list") pattern(s)"
+          if [ "$mode" = paths ]; then
+            echo "client-data scrub: no private-shaped path. Content was not checked."
+          else
+            echo "client-data scrub: no private-shaped path and no client named, $(wc -l < "$list") pattern(s)"
+          fi
 
   gate:
     name: Tests (pytest + web gate)
@@ -925,10 +988,12 @@ jobs:
       # Client-data scrub, check 5 of docs/security-gate-plan.md. Fails on a
       # path `beesec pr` would refuse, and on a line naming a client from the
       # org secret CLIENT_SCRUB_PATTERNS, which this public repository cannot
-      # hold. On a PR it reads only what the PR adds; elsewhere the whole
-      # tree. It prints file and line, never the text. Off unless the caller
-      # sets security_checks, and reports without failing until
-      # security_enforce (the week in shadow, decision C).
+      # hold. On a PR it reads <merge-base>..<head>, on a push
+      # <merge-base>..<sha> from the push's before, or paths only when there
+      # is no usable before, and on any other event the whole tree. It prints
+      # file and line, never the text. Off unless the caller sets
+      # security_checks, and reports without failing until security_enforce
+      # (the week in shadow, decision C).
       - name: Client-data scrub
         id: scrub
         if: inputs.security_checks
@@ -936,82 +1001,143 @@ jobs:
         env:
           EVENT: ${{ github.event_name }}
           BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BEFORE: ${{ github.event.before }}
+          SHA: ${{ github.sha }}
           PATTERNS: ${{ secrets.CLIENT_SCRUB_PATTERNS }}
         run: |
           set -euo pipefail
           # The path shape `beesec pr` refuses, copied verbatim from
-          # claude-project-setup bin/beesec, and tests/scrub.test.sh fails if the
-          # two drift apart.
+          # claude-project-setup bin/beesec. That repository is private, so CI cannot
+          # read it: tests/scrub.test.sh compares the two on a machine that has the
+          # CLI and skips the comparison in CI, so a drift is caught by hand.
           PRIVATE_SHAPED='_private/|findings-brain\.json|\.pem$|\.key$|id_rsa|secrets\.md'
           list=$(mktemp -p "$RUNNER_TEMP"); trap 'rm -f "$list"' EXIT
           # One fixed string per line. CR and surrounding blanks are stripped, and a
           # blank line is dropped, because an empty fixed string matches every line.
           printf '%s\n' "${PATTERNS:-}" | tr -d '\r' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -v '^$' > "$list" || true
-          if [ ! -s "$list" ]; then
-            echo "::error::CLIENT_SCRUB_PATTERNS is not set, so the scrub has nothing to look for. Is the caller passing secrets: inherit?"
-            exit 1
-          fi
           git() { command git -c core.quotePath=false "$@"; }
           hits=0
 
-          if [ "$EVENT" = pull_request ]; then
-            case "${BASE:-}" in
-              *[!0-9a-f]*|"") echo "::error::no usable PR base in the event"; exit 1 ;;
-            esac
-            [ "${#BASE}" = 40 ] || { echo "::error::no usable PR base in the event"; exit 1; }
-            git fetch -q --no-tags --depth=1 origin "$BASE" || { echo "::error::could not fetch the PR base $BASE"; exit 1; }
-            paths=$(git diff --name-only --no-renames --diff-filter=d "$BASE" HEAD)
-          else
-            paths=$(git ls-files)
-          fi
-
-          while IFS= read -r f; do
-            [ -n "$f" ] || continue
-            echo "::error file=$f::private-shaped path in the change: $f"
+          # A path goes into annotation properties, which end at "," and "::" and
+          # cannot hold a line break, so it is percent-encoded there. The message
+          # after "::" needs only %, CR and LF encoded.
+          msg() { local s=$1; s=${s//'%'/%25}; s=${s//$'\r'/%0D}; s=${s//$'\n'/%0A}; printf '%s' "$s"; }
+          prop() { local s; s=$(msg "$1"); s=${s//:/%3A}; s=${s//,/%2C}; printf '%s' "$s"; }
+          annotate() {
+            echo "::error file=$(prop "$1"),line=$2::a line names a client from CLIENT_SCRUB_PATTERNS: $(msg "$1"):$2"
             hits=$((hits + 1))
-          done < <(printf '%s\n' "$paths" | grep -E "$PRIVATE_SHAPED" || true)
+          }
+
+          sha_ok() {
+            case "$1" in *[!0-9a-f]*|"") return 1 ;; esac
+            [ "${#1}" = 40 ] && [ "$1" != 0000000000000000000000000000000000000000 ]
+          }
+          fetch_commit() { git cat-file -e "$1^{commit}" 2>/dev/null || git fetch -q --no-tags --depth=1 origin "$1"; }
+          # The merge base of two commits, deepening a shallow checkout 50 commits at
+          # a time for up to 20 rounds, then fetching full history once (plan section 1).
+          merge_base() {
+            local i
+            for i in $(seq 20); do
+              git merge-base "$1" "$2" 2>/dev/null && return 0
+              [ "$(git rev-parse --is-shallow-repository)" = true ] || return 1
+              git fetch -q --no-tags --deepen=50 origin "$1" "$2" || return 1
+            done
+            git merge-base "$1" "$2" 2>/dev/null && return 0
+            git fetch -q --no-tags --unshallow origin "$1" "$2" || return 1
+            git merge-base "$1" "$2"
+          }
+
+          # What is read: <merge-base>..<head> on a PR, so main's commits reached
+          # through GitHub's merge commit are not counted, and <merge-base>..<sha> on
+          # a push. A push with no usable before, a new branch or a force push, has
+          # nothing to diff against, so only the tree's paths are checked. Any other
+          # event reads the whole tree.
+          mode=tree
+          case "$EVENT" in
+            pull_request)
+              if ! sha_ok "${BASE:-}" || ! sha_ok "${HEAD_SHA:-}"; then
+                echo "::error::no usable PR base or head in the event"; exit 1
+              fi
+              if ! fetch_commit "$BASE" || ! fetch_commit "$HEAD_SHA"; then
+                echo "::error::could not fetch the PR base $BASE or head $HEAD_SHA"; exit 1
+              fi
+              from=$(merge_base "$BASE" "$HEAD_SHA") || { echo "::error::no merge base between the PR base and head"; exit 1; }
+              to=$HEAD_SHA; mode=diff ;;
+            push)
+              if sha_ok "${BEFORE:-}" && sha_ok "${SHA:-}" && fetch_commit "$BEFORE" 2>/dev/null && fetch_commit "$SHA" \
+                  && from=$(merge_base "$BEFORE" "$SHA"); then
+                to=$SHA; mode=diff
+              else
+                mode=paths
+                echo "::notice::client-data scrub: content half skipped, because this push has no usable github.event.before. Only paths were checked."
+              fi ;;
+          esac
+
+          if [ "$mode" = diff ]; then
+            names=(git diff --name-only -z --no-renames --diff-filter=d "$from" "$to")
+          else
+            names=(git ls-files -z)
+          fi
+          while IFS= read -r -d '' f; do
+            [[ $f =~ $PRIVATE_SHAPED ]] || continue
+            echo "::error file=$(prop "$f")::private-shaped path in the change: $(msg "$f")"
+            hits=$((hits + 1))
+          done < <("${names[@]}")
+
+          # The path half needs no list, so it has run before this, as on a
+          # Dependabot or fork PR, which gets no secret.
+          if [ ! -s "$list" ]; then
+            echo "::error::CLIENT_SCRUB_PATTERNS is not set, so the scrub has nothing to look for. Is the caller passing secrets: inherit? Paths were checked, $hits hit(s)."
+            exit 1
+          fi
 
           # Content. Only file and line number are ever printed, never the line or
           # the pattern, so a hit does not copy client data into the log.
-          if [ "$EVENT" = pull_request ]; then
-            # The lines the PR adds. The hunk header gives each added line's number
-            # in the new file, and the counts say where a hunk ends, so an added
-            # line that itself starts with "++" is not taken for a file header.
-            found=$(git diff -U0 --no-renames --no-color --no-ext-diff "$BASE" HEAD | awk '
-              FNR == NR { p[++n] = tolower($0); next }
-              remold > 0 || remnew > 0 {
-                c = substr($0, 1, 1)
-                if (c == "+") {
-                  l = tolower(substr($0, 2))
-                  for (i = 1; i <= n; i++) if (index(l, p[i])) { print file ":" ln; break }
-                  ln++; remnew--
-                } else if (c == "-") remold--
-                else if (c == " ") { ln++; remold--; remnew-- }
-                next
-              }
-              /^\+\+\+ / { file = substr($0, 5); sub(/\t$/, "", file); sub(/^b\//, "", file); next }
-              /^@@ / {
-                split($2, o, ","); split($3, nw, ",")
-                remold = (2 in o) ? o[2] + 0 : 1
-                remnew = (2 in nw) ? nw[2] + 0 : 1
-                ln = substr(nw[1], 2) + 0
-              }' "$list" -)
-          else
-            found=$({ git grep -I -n -i -F -f "$list" -z -- . || true; } | while IFS= read -r -d '' f && IFS= read -r -d '' n && IFS= read -r _; do
-              printf '%s:%s\n' "$f" "$n"
-            done)
-          fi
-          while IFS= read -r at; do
-            [ -n "$at" ] || continue
-            echo "::error file=${at%:*},line=${at##*:}::a line names a client from CLIENT_SCRUB_PATTERNS: $at"
-            hits=$((hits + 1))
-          done <<< "$found"
+          case "$mode" in
+            diff)
+              # The lines the range adds. The hunk header gives each added line's
+              # number in the new file, and the counts say where a hunk ends, so an
+              # added line that itself starts with "++" is not taken for a file header.
+              while IFS= read -r at; do
+                [ -n "$at" ] || continue
+                annotate "${at%:*}" "${at##*:}"
+              done < <(git diff -U0 --no-renames --no-color --no-ext-diff "$from" "$to" | awk '
+                FNR == NR { p[++n] = tolower($0); next }
+                remold > 0 || remnew > 0 {
+                  c = substr($0, 1, 1)
+                  if (c == "+") {
+                    l = tolower(substr($0, 2))
+                    for (i = 1; i <= n; i++) if (index(l, p[i])) { print file ":" ln; break }
+                    ln++; remnew--
+                  } else if (c == "-") remold--
+                  else if (c == " ") { ln++; remold--; remnew-- }
+                  next
+                }
+                /^\+\+\+ / { file = substr($0, 5); sub(/\t$/, "", file); sub(/^b\//, "", file); next }
+                /^@@ / {
+                  split($2, o, ","); split($3, nw, ",")
+                  remold = (2 in o) ? o[2] + 0 : 1
+                  remnew = (2 in nw) ? nw[2] + 0 : 1
+                  ln = substr(nw[1], 2) + 0
+                }' "$list" -)
+              ;;
+            tree)
+              while IFS= read -r -d '' f && IFS= read -r -d '' n && IFS= read -r _; do
+                annotate "$f" "$n"
+              done < <(git grep -I -n -i -F -f "$list" -z -- . || true)
+              ;;
+          esac
 
           if [ "$hits" -gt 0 ]; then
             echo "::error::client-data scrub: $hits hit(s). Client data has no place in an app repository, so there is no inline override. A false match is fixed in the pattern list, which the operator owns."
             exit 1
           fi
-          echo "client-data scrub: no private-shaped path and no client named, $(wc -l < "$list") pattern(s)"
+          if [ "$mode" = paths ]; then
+            echo "client-data scrub: no private-shaped path. Content was not checked."
+          else
+            echo "client-data scrub: no private-shaped path and no client named, $(wc -l < "$list") pattern(s)"
+          fi
 
       - name: Install system packages
         if: inputs.apt_packages != '' && (needs.pick.outputs.api == 'true' || inputs.extra_gate_script != '')
