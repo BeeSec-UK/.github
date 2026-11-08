@@ -323,7 +323,8 @@ jobs:
   # missing app, a 403, a
   # network blip, falls back to `runner`, so runner status can slow a run
   # down by twenty seconds and never stops one. The target step can stop
-  # a run, but only when ref is set and refused. The status is read at the
+  # a run, but only when ref is set, and then only when it refuses ref or
+  # its lookup fails. The status is read at the
   # repo AND the org, because a workstation may be registered at either.
   pick:
     name: Pick a runner
