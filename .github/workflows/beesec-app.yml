@@ -276,10 +276,12 @@ on:
           this one from a job holding id-token: write, because a push run's
           gate restores the GitHub cache that a ref run's branch code could
           have written. For the same reason the job calling this one grants
-          contents: read only, plus checks: read where trust_pr_gate is
-          used: a push run's gate keeps its checkout credentials, so a
-          poisoned cache entry would get the GITHUB_TOKEN with whatever
-          that job grants.
+          contents: read only: a push run's gate keeps its checkout
+          credentials, so a poisoned cache entry would get the GITHUB_TOKEN
+          with whatever that job grants. So a listed repo does not set
+          trust_pr_gate, which needs pull-requests: read and checks: read,
+          and which would also count a ref run's green check, attached to
+          main's head rather than the commit tested.
           A ref run saves no GitHub cache, because it runs in main's cache
           scope, but the branch's code can still read the runner's cache
           token and write main's cache itself. So a job that deploys must
