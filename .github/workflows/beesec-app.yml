@@ -256,6 +256,61 @@ on:
         type: boolean
         default: false
 
+      ref:
+        description: >-
+          A branch or tag of this repo for a manual run to test instead of main,
+          so the caller can deploy it to dev (beesec-factory ADR 0002). Only
+          on workflow_dispatch from main, because the dev identity trusts
+          main's OIDC subject and a run from any other ref fails its login.
+          Resolved once to a SHA in the pick job, which the gate checks out
+          and the caller passes to deploy-app.yml as `source-ref` through
+          the `ref_sha` output, to dev only. The `sha` output stays
+          github.sha on every run, so a caller that wires `sha` into its
+          prod deploy keeps deploying main. The built-in deploys never
+          follow it, so it is
+          refused while deploy_api or deploy_swa is on, and refused when the
+          job calling this workflow holds id-token: write, because the
+          branch's code would then get an OIDC token as main. It names a
+          branch or tag of this repo only, never a bare SHA, so a fork's
+          commit or a pull request ref cannot be chosen, and the checkout
+          it drives keeps no credentials. Empty tests the commit the run
+          was started on, exactly as before.
+          ref is refused unless the calling repository is listed in
+          REF_REPOS in the pick job's target step. The list lives in this
+          workflow, not in a variable a caller's admin could override, so
+          enabling ref for an app is a reviewed PR here, one app at a time.
+          It ships empty. An app is listed only once its prod deploy job
+          builds github.sha rather than `ref_sha` and refuses to run when
+          `ref_run` is true, so a dispatch on main cannot carry a branch
+          commit through a prod environment restricted to main. And only
+          once its dev deploy, which builds `ref_sha` on a dispatch from
+          main, cannot hand a main-subject OIDC token to the branch's code:
+          either the prod identity's federated credential no longer accepts
+          the bare ref:refs/heads/main subject, for example because it is
+          bound to a GitHub environment the dev job cannot claim, or the dev
+          deploy runs no branch code, install scripts and build included,
+          while it can mint a token. And no workflow in that repo calls
+          this one from a job holding id-token: write, because a push run's
+          gate restores the GitHub cache that a ref run's branch code could
+          have written. For the same reason the job calling this one grants
+          contents: read only: a push run's gate keeps its checkout
+          credentials, so a poisoned cache entry would get the GITHUB_TOKEN
+          with whatever that job grants. So a listed repo does not set
+          trust_pr_gate, which needs pull-requests: read and checks: read,
+          and which would also count a ref run's green check, attached to
+          main's head rather than the commit tested.
+          A ref run saves no GitHub cache, because it runs in main's cache
+          scope, but the branch's code can still read the runner's cache
+          token and write main's cache itself. So a job that deploys must
+          never restore a GitHub cache: deploy_api here restores none, and
+          a caller's own deploy job must not either. That rule covers the
+          GitHub cache only. A self-hosted runner also keeps its workspace,
+          ~/.cache and RUNNER_TOOL_CACHE between jobs, and branch code
+          could leave something there for a later job on the same box, as
+          a same-repo pull request run already could.
+        type: string
+        default: ''
+
     outputs:
       # For a caller that keeps its own deploy jobs (propolis, apiary): the
       # pick job's verdict, so `needs.pipeline.outputs.deploy_api == 'true'`
@@ -270,6 +325,15 @@ on:
       tests:
         description: Whether the gate ran at all on this run.
         value: ${{ jobs.pick.outputs.tests }}
+      sha:
+        description: github.sha, on every run, ref or not. A prod deploy builds this one and nothing else.
+        value: ${{ jobs.pick.outputs.sha }}
+      ref_sha:
+        description: The commit `ref` resolved to and the gate tested. Empty unless ref is set. For a dev deploy only.
+        value: ${{ jobs.pick.outputs.ref_sha }}
+      ref_run:
+        description: "'true' when this run tested `ref` rather than github.sha. A prod deploy job refuses to run when it is."
+        value: ${{ jobs.pick.outputs.ref_run }}
 
 jobs:
   # Which runner the rest of the run lands on. See `prefer_runner`. The
@@ -279,10 +343,11 @@ jobs:
   # variable RUNNER_STATUS_APP_ID, org secret RUNNER_STATUS_APP_KEY, reaching
   # here through the caller's `secrets: inherit`. RUNNER_STATUS_TOKEN was
   # read before but never existed, so every pick got 403. Every failure, a
-  # missing app, a 403, a
-  # network blip, falls back to `runner`, so this job can slow a run down
-  # by twenty seconds and can never stop one. The status is read at the
-  # repo AND the org, because a workstation may be registered at either.
+  # missing app, a 403, a network blip, falls back to `runner`, so runner
+  # status can slow a run down by twenty seconds and never stops one. The
+  # target step can stop a run, but only when ref is set, and then only
+  # when it refuses ref or its lookup fails. The status is read at the repo
+  # AND the org, because a workstation may be registered at either.
   pick:
     name: Pick a runner
     runs-on: ${{ fromJSON(inputs.runner) }}
@@ -294,7 +359,111 @@ jobs:
       tests: ${{ steps.scope.outputs.tests }}
       deploy_api: ${{ steps.scope.outputs.deploy_api }}
       deploy_web: ${{ steps.scope.outputs.deploy_web }}
+      sha: ${{ github.sha }}
+      ref_sha: ${{ steps.target.outputs.ref_sha }}
+      ref_run: ${{ inputs.ref != '' }}
     steps:
+      # The commit this run tests, resolved once so every job checks out the
+      # same bytes even if the branch moves mid-run. See the `ref` input.
+      # REF reaches the script through env and is checked against a plain
+      # ref shape before it goes near a URL.
+      - id: target
+        env:
+          REF: ${{ inputs.ref }}
+          EVENT: ${{ github.event_name }}
+          GH_REF: ${{ github.ref }}
+          SHA: ${{ github.sha }}
+          DEPLOY_API: ${{ inputs.deploy_api }}
+          DEPLOY_SWA: ${{ inputs.deploy_swa }}
+          # Repositories allowed to use ref, space-separated, owner/name.
+          # A literal, never a variable, so only a PR to this repository
+          # can change it. See the ref input for when an app is listed.
+          REF_REPOS: ''
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # No ref: nothing to resolve, the jobs check out their default
+          # and ref_sha stays empty.
+          if [ -z "$REF" ]; then
+            exit 0
+          fi
+          # Off for every app until it is listed here. See the ref input.
+          case " $REF_REPOS " in
+            *" $REPO "*) ;;
+            *)
+              echo "::error::ref is refused because $REPO is not in REF_REPOS in beesec-app.yml. An app is added by a PR there once its prod deploy builds github.sha and refuses a ref run."
+              exit 1 ;;
+          esac
+          if [ "$EVENT" != "workflow_dispatch" ] || [ "$GH_REF" != "refs/heads/main" ]; then
+            echo "::error::ref is for a manual run dispatched on main only; this is $EVENT on $GH_REF"
+            exit 1
+          fi
+          if [ "$DEPLOY_API" = "true" ] || [ "$DEPLOY_SWA" = "true" ]; then
+            echo "::error::ref is refused while deploy_api or deploy_swa is on: the built-in deploys build github.sha, not ref. Deploy through deploy-app.yml with source-ref."
+            exit 1
+          fi
+          # ref runs a branch's unreviewed code in the gate. If this job can
+          # mint an OIDC token, so can that code, with main's subject, which
+          # the managed identities, prod included, are federated to. So ref
+          # needs a caller that grants id-token: write to its deploy job
+          # only, never to the job that calls this workflow.
+          if [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+            echo "::error::ref is refused because this run can mint an OIDC token as main, and the branch's code would get it too. Grant id-token: write to the caller's deploy job only, not to the job calling beesec-app.yml."
+            exit 1
+          fi
+          # A bash match, not grep: grep checks a line at a time, so a valid
+          # name, a newline, then anything would pass.
+          # The rest are names git check-ref-format refuses, which would
+          # only 404.
+          if ! [[ $REF =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$ ]] || [[ $REF == *..* ]] \
+             || [[ $REF == */ || $REF == *. || $REF == *//* || $REF == */.* ]] \
+             || [[ $REF == *.lock || $REF == *.lock/* ]]; then
+            echo "::error::ref is not a branch or tag name"
+            exit 1
+          fi
+          # Only this repo's own branches and tags. The commits API would
+          # also resolve a SHA from any fork, or refs/pull/N/head.
+          # A 404 is an answer, no such ref. Anything else is a failed
+          # lookup and stops the run, so it is never reported as a missing ref.
+          body=$(mktemp -p "$RUNNER_TEMP")
+          gh_ref() {
+            local code
+            code=$(curl -sS --max-time 20 -o "$body" -w '%{http_code}' \
+                     -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" \
+                     "https://api.github.com/repos/$REPO/git/$1") || code=000
+            case "$code" in
+              200) cat "$body" ;;
+              404) ;;
+              *) echo "::error::could not look up $1 in $REPO (HTTP $code), so ref was not resolved" >&2
+                 return 1 ;;
+            esac
+          }
+          # jq without || true: a 200 that is not JSON stops the run too.
+          res=$(gh_ref "ref/heads/$REF")
+          obj=$(printf '%s' "$res" | jq -r 'select(.object.type=="commit") | .object.sha // empty')
+          if [ -z "$obj" ]; then
+            res=$(gh_ref "ref/tags/$REF")
+            tag=$(printf '%s' "$res" | jq -r '"\(.object.type // "") \(.object.sha // "")"')
+            case "$tag" in
+              "commit "*) obj=${tag#commit } ;;
+              "tag "*)    res=$(gh_ref "tags/${tag#tag }")
+                          obj=$(printf '%s' "$res" | jq -r 'select(.object.type=="commit") | .object.sha // empty') ;;
+            esac
+          fi
+          sha=$obj
+          if ! printf '%s' "$sha" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::error::'$REF' is not a branch or tag of $REPO"
+            exit 1
+          fi
+          echo "testing $REF at $sha"
+          echo "ref_sha=$sha" >> "$GITHUB_OUTPUT"
+          # The gate's check runs attach to github.sha, main's head, not to
+          # the commit tested, so say which one was.
+          {
+            echo "### Tested \`$REF\` at \`$sha\`"
+            echo "This run's check runs attach to \`$SHA\`, the commit it was dispatched on, not to the commit tested."
+          } >> "$GITHUB_STEP_SUMMARY"
       - id: status-token
         if: inputs.prefer_runner != '' && vars.RUNNER_STATUS_APP_ID != ''
         continue-on-error: true
@@ -491,6 +660,11 @@ jobs:
 
       - uses: actions/checkout@v4
         if: steps.scope.outputs.tests != 'true'
+        with:
+          # Empty unless ref is set, so a push still checks out its branch.
+          ref: ${{ inputs.ref != '' && steps.target.outputs.ref_sha || '' }}
+          # Branch code from `ref` gets no stored token to reuse.
+          persist-credentials: ${{ inputs.ref == '' }}
       - name: Secret scan (gitleaks), because the gate is skipped
         if: steps.scope.outputs.tests != 'true'
         run: |
@@ -504,28 +678,28 @@ jobs:
           # tried again on failure: on 2026-09-10 a truncated tarball
           # ("gzip: stdin: unexpected end of file") failed a honeycomb main
           # run's gate with exit code 2 and nothing in the code had changed.
-          GL_DIR="${RUNNER_TOOL_CACHE:-/tmp}/gitleaks/${VER}"
+          GL_DIR="${RUNNER_TOOL_CACHE:-$RUNNER_TEMP}/gitleaks/${VER}"
           GL="$GL_DIR/gitleaks"
           if ! "$GL" version >/dev/null 2>&1; then
             mkdir -p "$GL_DIR"
             ok=""
             for attempt in 1 2 3 4; do
-              if curl -sSL --retry 3 --retry-all-errors -o /tmp/gl.tgz \
+              if curl -sSL --retry 3 --retry-all-errors -o "$RUNNER_TEMP/gl.tgz" \
                    "https://github.com/gitleaks/gitleaks/releases/download/v${VER}/gitleaks_${VER}_linux_x64.tar.gz" \
-                 && tar tzf /tmp/gl.tgz >/dev/null 2>&1 \
-                 && tar xzf /tmp/gl.tgz -C "$GL_DIR" gitleaks \
+                 && tar tzf "$RUNNER_TEMP/gl.tgz" >/dev/null 2>&1 \
+                 && tar xzf "$RUNNER_TEMP/gl.tgz" -C "$GL_DIR" gitleaks \
                  && "$GL" version >/dev/null 2>&1; then
                 ok=1; break
               fi
               echo "gitleaks download attempt ${attempt} failed; retrying"
-              rm -f /tmp/gl.tgz "$GL"; sleep $((attempt * 5))
+              rm -f "$RUNNER_TEMP/gl.tgz" "$GL"; sleep $((attempt * 5))
             done
             [ -n "$ok" ] || { echo "::error::could not fetch a usable gitleaks ${VER}"; exit 1; }
           fi
-          curl -sSL --retry 3 --retry-all-errors -o /tmp/gitleaks.toml \
+          curl -sSL --retry 3 --retry-all-errors -o "$RUNNER_TEMP/gitleaks.toml" \
             https://raw.githubusercontent.com/BeeSec-UK/.github/main/.gitleaks.toml
-          grep -q '\[' /tmp/gitleaks.toml || { echo "::error::gitleaks config download was not a TOML file"; exit 1; }
-          "$GL" dir . -c /tmp/gitleaks.toml --no-banner --redact --exit-code 1
+          grep -q '\[' "$RUNNER_TEMP/gitleaks.toml" || { echo "::error::gitleaks config download was not a TOML file"; exit 1; }
+          "$GL" dir . -c "$RUNNER_TEMP/gitleaks.toml" --no-banner --redact --exit-code 1
 
       # Client-data scrub, check 5 of docs/security-gate-plan.md. Fails on a
       # path `beesec pr` would refuse, and on a line naming a client from the
@@ -676,6 +850,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
+          ref: ${{ inputs.ref != '' && needs.pick.outputs.ref_sha || '' }}
+          persist-credentials: ${{ inputs.ref == '' }}
 
       # SECRET SCAN FIRST, before anything expensive.
       #
@@ -718,30 +894,30 @@ jobs:
           # tried again on failure: on 2026-09-10 a truncated tarball
           # ("gzip: stdin: unexpected end of file") failed a honeycomb main
           # run's gate with exit code 2 and nothing in the code had changed.
-          GL_DIR="${RUNNER_TOOL_CACHE:-/tmp}/gitleaks/${VER}"
+          GL_DIR="${RUNNER_TOOL_CACHE:-$RUNNER_TEMP}/gitleaks/${VER}"
           GL="$GL_DIR/gitleaks"
           if ! "$GL" version >/dev/null 2>&1; then
             mkdir -p "$GL_DIR"
             ok=""
             for attempt in 1 2 3 4; do
-              if curl -sSL --retry 3 --retry-all-errors -o /tmp/gl.tgz \
+              if curl -sSL --retry 3 --retry-all-errors -o "$RUNNER_TEMP/gl.tgz" \
                    "https://github.com/gitleaks/gitleaks/releases/download/v${VER}/gitleaks_${VER}_linux_x64.tar.gz" \
-                 && tar tzf /tmp/gl.tgz >/dev/null 2>&1 \
-                 && tar xzf /tmp/gl.tgz -C "$GL_DIR" gitleaks \
+                 && tar tzf "$RUNNER_TEMP/gl.tgz" >/dev/null 2>&1 \
+                 && tar xzf "$RUNNER_TEMP/gl.tgz" -C "$GL_DIR" gitleaks \
                  && "$GL" version >/dev/null 2>&1; then
                 ok=1; break
               fi
               echo "gitleaks download attempt ${attempt} failed; retrying"
-              rm -f /tmp/gl.tgz "$GL"; sleep $((attempt * 5))
+              rm -f "$RUNNER_TEMP/gl.tgz" "$GL"; sleep $((attempt * 5))
             done
             [ -n "$ok" ] || { echo "::error::could not fetch a usable gitleaks ${VER}"; exit 1; }
           fi
-          curl -sSL --retry 3 --retry-all-errors -o /tmp/gitleaks.toml \
+          curl -sSL --retry 3 --retry-all-errors -o "$RUNNER_TEMP/gitleaks.toml" \
             https://raw.githubusercontent.com/BeeSec-UK/.github/main/.gitleaks.toml
-          grep -q '\[' /tmp/gitleaks.toml || { echo "::error::gitleaks config download was not a TOML file"; exit 1; }
+          grep -q '\[' "$RUNNER_TEMP/gitleaks.toml" || { echo "::error::gitleaks config download was not a TOML file"; exit 1; }
           # Scan the checked-out tree. `git` mode would rescan full history on
           # every run for no extra safety once history is known clean.
-          "$GL" dir . -c /tmp/gitleaks.toml --no-banner --redact --exit-code 1
+          "$GL" dir . -c "$RUNNER_TEMP/gitleaks.toml" --no-banner --redact --exit-code 1
 
       # Only when something is missing. A self-hosted runner keeps its
       # packages between runs, so on every run after the first this was an
@@ -949,7 +1125,7 @@ jobs:
           # "Set up Python" before "Aborting cache download as the download
           # time exceeded the timeout", then pip used the local cache anyway
           # (run 34372785601). The tests took 49 seconds.
-          cache: ${{ runner.environment == 'github-hosted' && 'pip' || '' }}
+          cache: ${{ runner.environment == 'github-hosted' && inputs.ref == '' && 'pip' || '' }}
           cache-dependency-path: ${{ inputs.requirements_path }}
 
       - name: Install API dependencies
@@ -971,7 +1147,7 @@ jobs:
         with:
           node-version: ${{ inputs.node_version }}
           # See the gate's Set up Python: no GitHub cache on a self-hosted box.
-          cache: ${{ runner.environment == 'github-hosted' && 'npm' || '' }}
+          cache: ${{ runner.environment == 'github-hosted' && inputs.ref == '' && 'npm' || '' }}
           cache-dependency-path: web/package-lock.json
 
       - name: Install web dependencies
@@ -1022,13 +1198,15 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
+          ref: ${{ inputs.ref != '' && needs.pick.outputs.ref_sha || '' }}
+          persist-credentials: ${{ inputs.ref == '' }}
 
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node_version }}
           # See the gate's Set up Python: no GitHub cache on a self-hosted box.
-          cache: ${{ runner.environment == 'github-hosted' && 'npm' || '' }}
+          cache: ${{ runner.environment == 'github-hosted' && inputs.ref == '' && 'npm' || '' }}
           cache-dependency-path: web/package-lock.json
 
       - name: Install web dependencies
@@ -1236,9 +1414,8 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ inputs.python_version }}
-          # See the gate's Set up Python: no GitHub cache on a self-hosted box.
-          cache: ${{ runner.environment == 'github-hosted' && 'pip' || '' }}
-          cache-dependency-path: ${{ inputs.package_requirements_path }}
+          # No GitHub cache: this job deploys to prod, and a ref run's branch
+          # code can write entries into main's cache scope. See the ref input.
 
       - name: Vendor dependencies into the package
         run: |
