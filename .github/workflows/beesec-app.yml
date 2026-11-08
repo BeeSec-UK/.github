@@ -239,46 +239,6 @@ on:
         type: string
         default: ''
 
-      security_checks:
-        description: >-
-          Run the security checks of docs/security-gate-plan.md as steps in
-          the gate, or in pick when the gate is skipped: today the
-          client-data scrub and, with iac_params_file, the IaC plan. Off by
-          default while their cost is measured.
-        type: boolean
-        default: false
-
-      security_enforce:
-        description: >-
-          Let a security check fail the run. Off, each check reports its
-          findings as annotations and the run carries on, for the week in
-          shadow before enforcement. Has no effect without security_checks.
-        type: boolean
-        default: false
-
-      iac_params_file:
-        description: >-
-          The caller's dev .bicepparam, e.g. infra/dev.bicepparam. Set, and
-          with security_checks on, a PR that touches infra/, a workflow
-          under .github/workflows or the params file runs the factory
-          plan action on it in the gate: the app-stack plan and the hub's
-          baseline rules, offline, with no Azure sign-in. It plans at the
-          factory version the caller's deploy-app.yml is pinned to, or
-          app-stack-v1.12.3 where there is none. It replaces a caller's own
-          plan job. Empty runs nothing.
-        type: string
-        default: ''
-
-      iac_subscription_name:
-        description: The plan's <app>-<env>, as the factory's baseline.json knows it, e.g. apitoxin-dev.
-        type: string
-        default: ''
-
-      iac_subscription_id:
-        description: The subscription the plan is for. Empty plans against the factory's placeholder id.
-        type: string
-        default: ''
-
       ref:
         description: >-
           A branch or tag of this repo for a manual run to test instead of main,
@@ -331,6 +291,46 @@ on:
           ~/.cache and RUNNER_TOOL_CACHE between jobs, and branch code
           could leave something there for a later job on the same box, as
           a same-repo pull request run already could.
+        type: string
+        default: ''
+
+      security_checks:
+        description: >-
+          Run the security checks of docs/security-gate-plan.md as steps in
+          the gate, or in pick when the gate is skipped: today the
+          client-data scrub and, with iac_params_file, the IaC plan. Off by
+          default while their cost is measured.
+        type: boolean
+        default: false
+
+      security_enforce:
+        description: >-
+          Let a security check fail the run. Off, each check reports its
+          findings as annotations and the run carries on, for the week in
+          shadow before enforcement. Has no effect without security_checks.
+        type: boolean
+        default: false
+
+      iac_params_file:
+        description: >-
+          The caller's dev .bicepparam, e.g. infra/dev.bicepparam. Set, and
+          with security_checks on, a PR that touches infra/, a workflow
+          under .github/workflows or the params file runs the factory
+          plan action on it in the gate: the app-stack plan and the hub's
+          baseline rules, offline, with no Azure sign-in. It plans at the
+          factory version the caller's deploy-app.yml is pinned to, or
+          app-stack-v1.12.3 where there is none. It replaces a caller's own
+          plan job. Empty runs nothing.
+        type: string
+        default: ''
+
+      iac_subscription_name:
+        description: The plan's <app>-<env>, as the factory's baseline.json knows it, e.g. apitoxin-dev.
+        type: string
+        default: ''
+
+      iac_subscription_id:
+        description: The subscription the plan is for. Empty plans against the factory's placeholder id.
         type: string
         default: ''
 
@@ -755,7 +755,7 @@ jobs:
           # claude-project-setup bin/beesec, and tests/scrub.test.sh fails if the
           # two drift apart.
           PRIVATE_SHAPED='_private/|findings-brain\.json|\.pem$|\.key$|id_rsa|secrets\.md'
-          list=$(mktemp); trap 'rm -f "$list"' EXIT
+          list=$(mktemp -p "$RUNNER_TEMP"); trap 'rm -f "$list"' EXIT
           # One fixed string per line. CR and surrounding blanks are stripped, and a
           # blank line is dropped, because an empty fixed string matches every line.
           printf '%s\n' "${PATTERNS:-}" | tr -d '\r' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -v '^$' > "$list" || true
@@ -977,7 +977,7 @@ jobs:
           # claude-project-setup bin/beesec, and tests/scrub.test.sh fails if the
           # two drift apart.
           PRIVATE_SHAPED='_private/|findings-brain\.json|\.pem$|\.key$|id_rsa|secrets\.md'
-          list=$(mktemp); trap 'rm -f "$list"' EXIT
+          list=$(mktemp -p "$RUNNER_TEMP"); trap 'rm -f "$list"' EXIT
           # One fixed string per line. CR and surrounding blanks are stripped, and a
           # blank line is dropped, because an empty fixed string matches every line.
           printf '%s\n' "${PATTERNS:-}" | tr -d '\r' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -v '^$' > "$list" || true
