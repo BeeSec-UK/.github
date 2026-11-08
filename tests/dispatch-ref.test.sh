@@ -76,7 +76,7 @@ chmod +x "$T/bin/curl"
 # each VAR=value overriding one input.
 run_target() {
   local ref=$1; shift
-  ( export PATH="$T/bin:$PATH" REF="$ref" EVENT=workflow_dispatch GH_REF=refs/heads/main \
+  ( export PATH="$T/bin:$PATH" RUNNER_TEMP="$T" REF="$ref" EVENT=workflow_dispatch GH_REF=refs/heads/main \
       SHA=ffffffffffffffffffffffffffffffffffffffff DEPLOY_API=false DEPLOY_SWA=false \
       REF_REPOS=BeeSec-UK/app TOKEN=x REPO=BeeSec-UK/app GITHUB_OUTPUT="$T/out" \
       GITHUB_STEP_SUMMARY="$T/summary"

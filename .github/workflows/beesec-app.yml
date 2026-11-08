@@ -380,20 +380,41 @@ jobs:
           fi
           # A bash match, not grep: grep checks a line at a time, so a valid
           # name, a newline, then anything would pass.
-          if ! [[ $REF =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$ ]] || [[ $REF == *..* ]]; then
+          # The rest are names git check-ref-format refuses, which would
+          # only 404.
+          if ! [[ $REF =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$ ]] || [[ $REF == *..* ]] \
+             || [[ $REF == */ || $REF == *. || $REF == *//* || $REF == */.* ]] \
+             || [[ $REF == *.lock || $REF == *.lock/* ]]; then
             echo "::error::ref is not a branch or tag name"
             exit 1
           fi
           # Only this repo's own branches and tags. The commits API would
           # also resolve a SHA from any fork, or refs/pull/N/head.
-          gh_ref() { curl -sS --max-time 20 -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" \
-                       "https://api.github.com/repos/$REPO/git/$1" 2>/dev/null || true; }
-          obj=$(gh_ref "ref/heads/$REF" | jq -r 'select(.object.type=="commit") | .object.sha // empty' 2>/dev/null || true)
+          # A 404 is an answer, no such ref. Anything else is a failed
+          # lookup and stops the run, so it is never reported as a missing ref.
+          body=$(mktemp -p "$RUNNER_TEMP")
+          gh_ref() {
+            local code
+            code=$(curl -sS --max-time 20 -o "$body" -w '%{http_code}' \
+                     -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" \
+                     "https://api.github.com/repos/$REPO/git/$1") || code=000
+            case "$code" in
+              200) cat "$body" ;;
+              404) ;;
+              *) echo "::error::could not look up $1 in $REPO (HTTP $code), so ref was not resolved" >&2
+                 return 1 ;;
+            esac
+          }
+          # jq without || true: a 200 that is not JSON stops the run too.
+          res=$(gh_ref "ref/heads/$REF")
+          obj=$(printf '%s' "$res" | jq -r 'select(.object.type=="commit") | .object.sha // empty')
           if [ -z "$obj" ]; then
-            tag=$(gh_ref "ref/tags/$REF" | jq -r '"\(.object.type // "") \(.object.sha // "")"' 2>/dev/null || true)
+            res=$(gh_ref "ref/tags/$REF")
+            tag=$(printf '%s' "$res" | jq -r '"\(.object.type // "") \(.object.sha // "")"')
             case "$tag" in
               "commit "*) obj=${tag#commit } ;;
-              "tag "*)    obj=$(gh_ref "tags/${tag#tag }" | jq -r 'select(.object.type=="commit") | .object.sha // empty' 2>/dev/null || true) ;;
+              "tag "*)    res=$(gh_ref "tags/${tag#tag }")
+                          obj=$(printf '%s' "$res" | jq -r 'select(.object.type=="commit") | .object.sha // empty') ;;
             esac
           fi
           sha=$obj
