@@ -259,7 +259,8 @@ on:
       iac_params_file:
         description: >-
           The caller's dev .bicepparam, e.g. infra/dev.bicepparam. Set, and
-          with security_checks on, a PR that touches infra/ runs the factory
+          with security_checks on, a PR that touches infra/, a workflow
+          under .github/workflows or the params file runs the factory
           plan action on it in the gate: the app-stack plan and the hub's
           baseline rules, offline, with no Azure sign-in. It plans at the
           factory version the caller's deploy-app.yml is pinned to, or
@@ -548,6 +549,7 @@ jobs:
           HAS_WEB: ${{ inputs.has_web }}
           SWA_PATHS: ${{ inputs.swa_paths }}
           PARALLEL_WEB: ${{ inputs.parallel_web_gate }}
+          IAC_PARAMS_FILE: ${{ inputs.iac_params_file }}
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           EVENT: ${{ github.event_name }}
@@ -558,6 +560,7 @@ jobs:
         run: |
           set -u
           api=true; web=true; swa=true; infra=false; narrowed=false; reason="everything: gates off"
+          params=${IAC_PARAMS_FILE#./}
           gh_api() { curl -sS --max-time 20 -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" "https://api.github.com/$1"; }
 
           if [ "$PATH_GATES" = "true" ]; then
@@ -592,10 +595,14 @@ jobs:
                   # tests in pytest or extra_gate_script run on an
                   # infra-only change, but it does not redeploy the
                   # Function App. The caller's pipeline file is already in
-                  # the API half through .github/.
+                  # the API half through .github/. The IaC plan also runs
+                  # when a caller workflow changes, because that is where
+                  # the deploy-app.yml pin it plans at lives, and when the
+                  # params file it plans changes wherever it sits.
                   case "$f" in
-                    infra/*) infra=true ;;
+                    infra/*|.github/workflows/*) infra=true ;;
                   esac
+                  if [ -n "$params" ] && [ "$f" = "$params" ]; then infra=true; fi
                 done <<< "$files"
                 reason="changed: api=$api web=$web infra=$infra ($(printf '%s\n' "$files" | grep -c .) files)"
               else
@@ -1048,15 +1055,35 @@ jobs:
       # take a version from an expression, so each supported version has its
       # own step, pinned by commit, and only the one that matches runs. A
       # caller with no deploy-app.yml pin is planned at app-stack-v1.12.3
-      # (decision A). Only on a PR into main that touches infra/, or on any such PR when
-      # the path gates are off. Off unless security_checks and
-      # iac_params_file, and shadow until security_enforce.
+      # (decision A). Only on a PR into main that touches infra/, a caller
+      # workflow or the params file, or on any such PR when the path gates
+      # are off. Off unless security_checks and iac_params_file, and shadow
+      # until security_enforce. The factory action puts its inputs into
+      # run: and into a PowerShell string, so the version step refuses any
+      # value that is not the plain shape of a params path, an <app>-<env>
+      # or a subscription GUID before a plan step can run.
       - name: IaC policy, the factory version the caller deploys
         id: iac_version
         if: inputs.security_checks && inputs.iac_params_file != '' && github.event_name == 'pull_request' && github.base_ref == 'main' && needs.pick.outputs.infra == 'true'
         continue-on-error: ${{ !inputs.security_enforce }}
+        env:
+          IAC_PARAMS_FILE: ${{ inputs.iac_params_file }}
+          IAC_SUBSCRIPTION_NAME: ${{ inputs.iac_subscription_name }}
+          IAC_SUBSCRIPTION_ID: ${{ inputs.iac_subscription_id }}
         run: |
           set -euo pipefail
+          if ! [[ $IAC_PARAMS_FILE =~ ^[A-Za-z0-9._/-]+\.bicepparam$ ]] || [[ $IAC_PARAMS_FILE == /* ]] || [[ /$IAC_PARAMS_FILE/ == */../* ]]; then
+            echo "::error::iac_params_file must be a relative path inside the repository ending .bicepparam, of letters, digits, dot, dash, underscore and slash"
+            exit 1
+          fi
+          if ! [[ $IAC_SUBSCRIPTION_NAME =~ ^[A-Za-z0-9-]*$ ]]; then
+            echo "::error::iac_subscription_name must be letters, digits and dashes, e.g. apitoxin-dev"
+            exit 1
+          fi
+          if [ -n "$IAC_SUBSCRIPTION_ID" ] && ! [[ $IAC_SUBSCRIPTION_ID =~ ^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$ ]]; then
+            echo "::error::iac_subscription_id must be a subscription GUID or empty"
+            exit 1
+          fi
           # The factory versions there is a plan step for below, with the commit
           # each tag points at. A version a caller moves to gets its own step here.
           KNOWN="app-stack-v1.8.3=34553a903f9e38660720e2468d46f265e9db1f23
@@ -1067,9 +1094,14 @@ jobs:
           shopt -s nullglob
           wfs=(.github/workflows/*.yml .github/workflows/*.yaml)
           found=()
+          # The ref stops at a quote, because YAML lets the value be quoted.
+          pin_re="beesec-factory/\.github/workflows/deploy-app\.yml@([^[:space:]\"']+)"
           while IFS= read -r line; do
             [ -n "$line" ] || continue
-            ref=$(sed -nE 's#.*beesec-factory/\.github/workflows/deploy-app\.yml@([^[:space:]]+).*#\1#p' <<< "$line")
+            # A commented-out pin is not a pin.
+            [[ $line =~ ^[[:space:]]*# ]] && continue
+            ref=""
+            [[ $line =~ $pin_re ]] && ref=${BASH_REMATCH[1]}
             note=$(grep -oE '#[[:space:]]*app-stack-v[0-9]+\.[0-9]+\.[0-9]+' <<< "$line" | grep -oE 'app-stack-v[0-9.]+' || true)
             tag=""
             if [[ $ref =~ ^app-stack-v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -1101,7 +1133,9 @@ jobs:
           else
             tag=${versions[0]}; why="the factory version the caller deploys"
           fi
-          if ! grep -q "^$tag=" <<< "$KNOWN"; then
+          known=""
+          while IFS='=' read -r t c; do [ "$t" = "$tag" ] && known=1; done <<< "$KNOWN"
+          if [ -z "$known" ]; then
             echo "::error::the caller deploys $tag, and this pipeline has no plan step for it. Add one to beesec-app.yml, pinned by commit."
             exit 1
           fi
