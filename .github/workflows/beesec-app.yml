@@ -272,7 +272,10 @@ on:
           the bare ref:refs/heads/main subject, for example because it is
           bound to a GitHub environment the dev job cannot claim, or the dev
           deploy runs no branch code, install scripts and build included,
-          while it can mint a token.
+          while it can mint a token. And no workflow in that repo calls
+          this one from a job holding id-token: write, because a push run's
+          gate restores the GitHub cache that a ref run's branch code could
+          have written.
           A ref run saves no GitHub cache, because it runs in main's cache
           scope, but the branch's code can still read the runner's cache
           token and write main's cache itself. So a job that deploys must
@@ -318,8 +321,9 @@ jobs:
   # here through the caller's `secrets: inherit`. RUNNER_STATUS_TOKEN was
   # read before but never existed, so every pick got 403. Every failure, a
   # missing app, a 403, a
-  # network blip, falls back to `runner`, so this job can slow a run down
-  # by twenty seconds and can never stop one. The status is read at the
+  # network blip, falls back to `runner`, so runner status can slow a run
+  # down by twenty seconds and never stops one. The target step can stop
+  # a run, but only when ref is set and refused. The status is read at the
   # repo AND the org, because a workstation may be registered at either.
   pick:
     name: Pick a runner
