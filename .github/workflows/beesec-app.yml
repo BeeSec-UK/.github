@@ -265,7 +265,14 @@ on:
           It ships empty. An app is listed only once its prod deploy job
           builds github.sha rather than `ref_sha` and refuses to run when
           `ref_run` is true, so a dispatch on main cannot carry a branch
-          commit through a prod environment restricted to main.
+          commit through a prod environment restricted to main. And only
+          once its dev deploy, which builds `ref_sha` on a dispatch from
+          main, cannot hand a main-subject OIDC token to the branch's code:
+          either the prod identity's federated credential no longer accepts
+          the bare ref:refs/heads/main subject, for example because it is
+          bound to a GitHub environment the dev job cannot claim, or the dev
+          deploy runs no branch code, install scripts and build included,
+          while it can mint a token.
           A ref run saves no GitHub cache, because it runs in main's cache
           scope, but the branch's code can still read the runner's cache
           token and write main's cache itself. So a job that deploys must
