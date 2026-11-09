@@ -268,6 +268,14 @@ out=$(cd "$R" && PATH="$T:$PATH" RUNNER_TEMP="$T" EVENT=pull_request BASE="$BASE
 says "a PR says the paths were not read" "paths were not read"
 rm -f "$T/git"
 
+# An awk failure on the diff stops the step too.
+printf '#!/bin/sh\nexit 2\n' > "$T/awk"; chmod +x "$T/awk"
+mkrepo awkfail; printf 'acme-widgets\n' > "$R/notes.md"; commit
+out=$(cd "$R" && PATH="$T:$PATH" RUNNER_TEMP="$T" EVENT=pull_request BASE="$BASE" HEAD_SHA="$(git rev-parse HEAD)" BEFORE="$BASE" SHA="$(git rev-parse HEAD)" PATTERNS="$P" bash "$T/scrub.sh" 2>&1); rc=$?
+[ "$rc" = 1 ] && pass "a failing awk fails the step" || fail "a failing awk fails the step" "rc=$rc"
+says "the awk failure says the content was not read" "awk failed, so the content was not read"
+rm -f "$T/awk"
+
 echo
 [ "$fails" = 0 ] && echo "all passed" || echo "$fails failed"
 [ "$fails" = 0 ]
