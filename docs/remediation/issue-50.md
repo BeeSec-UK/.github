@@ -49,4 +49,12 @@ There is no `-dev.beesec.co.uk` surface: this is GitHub Actions logic. The proof
 
 ## Execution plan
 
-Pending: written by the issue creator after peer review approves this plan.
+#51 merged before this section was written, so it is added here with the fix and was recorded first on #50 as the R6 comment. The operator waived the human peer review of #51, and the bot's approval stood.
+
+| ID | Outcome | Depends on | Owner | Model | h | Forecast tokens | Gate on dev |
+|---|---|---|---|---|---|---|---|
+| GH-fix-50.1 | `tests/gitleaks.test.sh` committed failing | – | .github chat | Opus | 0.5 | 1 M | The test is red on the fix branch's first commit, locally |
+| GH-fix-50.2 | Both steps pin and check the archive and binary hashes, and run a checked copy | .1 | .github chat | Opus | 1 | 2 M | The test passes in pr-tests, and the R0 reproduction re-run shows no tampered or substituted binary run |
+| GH-fix-50.3 | Review of the fix | .2 | BeeSec-Peer-Reviewer | Opus | 0.5 | 1 M | The bot approves the current head, with its security pass |
+
+The fix also takes the bot's two suggestions on #51. The cached binary is copied into `$RUNNER_TEMP`, and the copy is checked and run. `sleep` is stubbed in the test.

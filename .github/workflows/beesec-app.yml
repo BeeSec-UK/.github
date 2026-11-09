@@ -653,36 +653,60 @@ jobs:
         run: |
           set -euo pipefail
           VER=8.28.0
+          # Bumping VER: GL_TGZ_SHA256 is the linux_x64 line of
+          # gitleaks_<VER>_checksums.txt on the release, and GL_BIN_SHA256 is
+          # `sha256sum` of the gitleaks file inside that archive. Both steps
+          # carry the same three values, and tests/gitleaks.test.sh checks it.
+          GL_TGZ_SHA256=a65b5253807a68ac0cafa4414031fd740aeb55f54fb7e55f386acb52e6a840eb
+          GL_BIN_SHA256=5fd1b3b0073269484d40078662e921d07427340ab9e6ed526ccd215a565b3298
           # The binary is kept in the runner's tool cache and downloaded only
-          # when that version is not there yet. On a self-hosted runner that
-          # is once per runner, not once per run; on a GitHub-hosted one the
-          # cache is empty and this is the same download as before. Every
-          # download is verified as a readable archive before it is used and
-          # tried again on failure: on 2026-09-10 a truncated tarball
-          # ("gzip: stdin: unexpected end of file") failed a honeycomb main
-          # run's gate with exit code 2 and nothing in the code had changed.
+          # when a good copy of that version is not there yet. On a
+          # self-hosted runner that is once per runner, not once per run. On a
+          # GitHub-hosted one the cache is empty and this is the same download
+          # as before. Nothing is trusted for answering `version` (#50): a
+          # download is checked against the release's own checksum before it
+          # is unpacked, and a cached binary is copied into RUNNER_TEMP and
+          # the copy checked and run, so code an earlier job left on a
+          # self-hosted runner can neither stand in for it nor swap the file
+          # between the check and the run. Downloads are tried again on
+          # failure: on 2026-09-10 a truncated tarball ("gzip: stdin:
+          # unexpected end of file") failed a honeycomb main run's gate.
           GL_DIR="${RUNNER_TOOL_CACHE:-$RUNNER_TEMP}/gitleaks/${VER}"
-          GL="$GL_DIR/gitleaks"
-          if ! "$GL" version >/dev/null 2>&1; then
-            mkdir -p "$GL_DIR"
+          RUN=$(mktemp -d -p "$RUNNER_TEMP")/gitleaks
+          bin_ok() { echo "$GL_BIN_SHA256  $1" | sha256sum -c --status 2>/dev/null; }
+          if [ -f "$GL_DIR/gitleaks" ]; then
+            cp "$GL_DIR/gitleaks" "$RUN"
+            if ! bin_ok "$RUN"; then
+              echo "::warning::cached gitleaks ${VER} failed its hash check, downloading again"
+              rm -f "$RUN" "$GL_DIR/gitleaks"
+            fi
+          fi
+          if [ ! -f "$RUN" ]; then
             ok=""
             for attempt in 1 2 3 4; do
-              if curl -sSL --retry 3 --retry-all-errors -o "$RUNNER_TEMP/gl.tgz" \
+              tgz="$RUNNER_TEMP/gl.tgz"; xdir=$(mktemp -d -p "$RUNNER_TEMP")
+              if curl -sSL --retry 3 --retry-all-errors -o "$tgz" \
                    "https://github.com/gitleaks/gitleaks/releases/download/v${VER}/gitleaks_${VER}_linux_x64.tar.gz" \
-                 && tar tzf "$RUNNER_TEMP/gl.tgz" >/dev/null 2>&1 \
-                 && tar xzf "$RUNNER_TEMP/gl.tgz" -C "$GL_DIR" gitleaks \
-                 && "$GL" version >/dev/null 2>&1; then
-                ok=1; break
+                 && echo "$GL_TGZ_SHA256  $tgz" | sha256sum -c --status \
+                 && tar xzf "$tgz" -C "$xdir" gitleaks \
+                 && bin_ok "$xdir/gitleaks"; then
+                cp "$xdir/gitleaks" "$RUN"
+                mkdir -p "$GL_DIR" && cp "$xdir/gitleaks" "$GL_DIR/gitleaks.new" \
+                  && mv -f "$GL_DIR/gitleaks.new" "$GL_DIR/gitleaks" || true
+                ok=1
               fi
-              echo "gitleaks download attempt ${attempt} failed; retrying"
-              rm -f "$RUNNER_TEMP/gl.tgz" "$GL"; sleep $((attempt * 5))
+              rm -rf "$tgz" "$xdir"
+              [ -n "$ok" ] && break
+              echo "gitleaks download attempt ${attempt} failed or did not match its checksum; retrying"
+              sleep $((attempt * 5))
             done
-            [ -n "$ok" ] || { echo "::error::could not fetch a usable gitleaks ${VER}"; exit 1; }
+            [ -n "$ok" ] || { echo "::error::could not fetch a gitleaks ${VER} matching its published checksum"; exit 1; }
           fi
+          chmod +x "$RUN"
           curl -sSL --retry 3 --retry-all-errors -o "$RUNNER_TEMP/gitleaks.toml" \
             https://raw.githubusercontent.com/BeeSec-UK/.github/main/.gitleaks.toml
           grep -q '\[' "$RUNNER_TEMP/gitleaks.toml" || { echo "::error::gitleaks config download was not a TOML file"; exit 1; }
-          "$GL" dir . -c "$RUNNER_TEMP/gitleaks.toml" --no-banner --redact --exit-code 1
+          "$RUN" dir . -c "$RUNNER_TEMP/gitleaks.toml" --no-banner --redact --exit-code 1
 
   gate:
     name: Tests (pytest + web gate)
@@ -778,38 +802,62 @@ jobs:
         run: |
           set -euo pipefail
           VER=8.28.0
+          # Bumping VER: GL_TGZ_SHA256 is the linux_x64 line of
+          # gitleaks_<VER>_checksums.txt on the release, and GL_BIN_SHA256 is
+          # `sha256sum` of the gitleaks file inside that archive. Both steps
+          # carry the same three values, and tests/gitleaks.test.sh checks it.
+          GL_TGZ_SHA256=a65b5253807a68ac0cafa4414031fd740aeb55f54fb7e55f386acb52e6a840eb
+          GL_BIN_SHA256=5fd1b3b0073269484d40078662e921d07427340ab9e6ed526ccd215a565b3298
           # The binary is kept in the runner's tool cache and downloaded only
-          # when that version is not there yet. On a self-hosted runner that
-          # is once per runner, not once per run; on a GitHub-hosted one the
-          # cache is empty and this is the same download as before. Every
-          # download is verified as a readable archive before it is used and
-          # tried again on failure: on 2026-09-10 a truncated tarball
-          # ("gzip: stdin: unexpected end of file") failed a honeycomb main
-          # run's gate with exit code 2 and nothing in the code had changed.
+          # when a good copy of that version is not there yet. On a
+          # self-hosted runner that is once per runner, not once per run. On a
+          # GitHub-hosted one the cache is empty and this is the same download
+          # as before. Nothing is trusted for answering `version` (#50): a
+          # download is checked against the release's own checksum before it
+          # is unpacked, and a cached binary is copied into RUNNER_TEMP and
+          # the copy checked and run, so code an earlier job left on a
+          # self-hosted runner can neither stand in for it nor swap the file
+          # between the check and the run. Downloads are tried again on
+          # failure: on 2026-09-10 a truncated tarball ("gzip: stdin:
+          # unexpected end of file") failed a honeycomb main run's gate.
           GL_DIR="${RUNNER_TOOL_CACHE:-$RUNNER_TEMP}/gitleaks/${VER}"
-          GL="$GL_DIR/gitleaks"
-          if ! "$GL" version >/dev/null 2>&1; then
-            mkdir -p "$GL_DIR"
+          RUN=$(mktemp -d -p "$RUNNER_TEMP")/gitleaks
+          bin_ok() { echo "$GL_BIN_SHA256  $1" | sha256sum -c --status 2>/dev/null; }
+          if [ -f "$GL_DIR/gitleaks" ]; then
+            cp "$GL_DIR/gitleaks" "$RUN"
+            if ! bin_ok "$RUN"; then
+              echo "::warning::cached gitleaks ${VER} failed its hash check, downloading again"
+              rm -f "$RUN" "$GL_DIR/gitleaks"
+            fi
+          fi
+          if [ ! -f "$RUN" ]; then
             ok=""
             for attempt in 1 2 3 4; do
-              if curl -sSL --retry 3 --retry-all-errors -o "$RUNNER_TEMP/gl.tgz" \
+              tgz="$RUNNER_TEMP/gl.tgz"; xdir=$(mktemp -d -p "$RUNNER_TEMP")
+              if curl -sSL --retry 3 --retry-all-errors -o "$tgz" \
                    "https://github.com/gitleaks/gitleaks/releases/download/v${VER}/gitleaks_${VER}_linux_x64.tar.gz" \
-                 && tar tzf "$RUNNER_TEMP/gl.tgz" >/dev/null 2>&1 \
-                 && tar xzf "$RUNNER_TEMP/gl.tgz" -C "$GL_DIR" gitleaks \
-                 && "$GL" version >/dev/null 2>&1; then
-                ok=1; break
+                 && echo "$GL_TGZ_SHA256  $tgz" | sha256sum -c --status \
+                 && tar xzf "$tgz" -C "$xdir" gitleaks \
+                 && bin_ok "$xdir/gitleaks"; then
+                cp "$xdir/gitleaks" "$RUN"
+                mkdir -p "$GL_DIR" && cp "$xdir/gitleaks" "$GL_DIR/gitleaks.new" \
+                  && mv -f "$GL_DIR/gitleaks.new" "$GL_DIR/gitleaks" || true
+                ok=1
               fi
-              echo "gitleaks download attempt ${attempt} failed; retrying"
-              rm -f "$RUNNER_TEMP/gl.tgz" "$GL"; sleep $((attempt * 5))
+              rm -rf "$tgz" "$xdir"
+              [ -n "$ok" ] && break
+              echo "gitleaks download attempt ${attempt} failed or did not match its checksum; retrying"
+              sleep $((attempt * 5))
             done
-            [ -n "$ok" ] || { echo "::error::could not fetch a usable gitleaks ${VER}"; exit 1; }
+            [ -n "$ok" ] || { echo "::error::could not fetch a gitleaks ${VER} matching its published checksum"; exit 1; }
           fi
+          chmod +x "$RUN"
           curl -sSL --retry 3 --retry-all-errors -o "$RUNNER_TEMP/gitleaks.toml" \
             https://raw.githubusercontent.com/BeeSec-UK/.github/main/.gitleaks.toml
           grep -q '\[' "$RUNNER_TEMP/gitleaks.toml" || { echo "::error::gitleaks config download was not a TOML file"; exit 1; }
           # Scan the checked-out tree. `git` mode would rescan full history on
           # every run for no extra safety once history is known clean.
-          "$GL" dir . -c "$RUNNER_TEMP/gitleaks.toml" --no-banner --redact --exit-code 1
+          "$RUN" dir . -c "$RUNNER_TEMP/gitleaks.toml" --no-banner --redact --exit-code 1
 
       # Only when something is missing. A self-hosted runner keeps its
       # packages between runs, so on every run after the first this was an
