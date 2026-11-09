@@ -233,6 +233,25 @@ run "a tree name with a newline fails" 1 workflow_dispatch "" "$P"
 says "the newline is escaped" "file=n%0Al.md,line=1::"
 if printf '%s\n' "$out" | grep -q '^l\.md'; then fail "no log line starts inside a path" "a name broke the line"; else pass "no log line starts inside a path"; fi
 
+
+# A .gitattributes in the change must not hide a hit: git prints no lines for a
+# file marked -diff or binary unless told --text.
+for a in '* -diff' '*.md binary'; do
+  mkrepo attr; printf '%s\n' "$a" > "$R/.gitattributes"; printf 'acme-widgets\n' > "$R/notes.md"; commit
+  run "a PR with '$a' in .gitattributes still fails on a hit" 1 pull_request "$BASE" "$P"
+  run "a tree with '$a' in .gitattributes still fails on a hit" 1 workflow_dispatch "" "$P"
+done
+
+# A git failure stops the step, never reads as an empty diff with no hits.
+mkrepo gitfail; printf 'new\n' > "$R/notes.md"; commit
+printf '#!/bin/sh\nfor a; do [ "$a" = diff ] || [ "$a" = grep ] && exit 128; done\nexec %s "$@"\n' "$(command -v git)" > "$T/git"; chmod +x "$T/git"
+out=$(cd "$R" && PATH="$T:$PATH" RUNNER_TEMP="$T" EVENT=pull_request BASE="$BASE" HEAD_SHA="$(git rev-parse HEAD)" BEFORE="$BASE" SHA="$(git rev-parse HEAD)" PATTERNS="$P" bash "$T/scrub.sh" 2>&1); rc=$?
+[ "$rc" = 1 ] && pass "a failing git diff fails the step" || fail "a failing git diff fails the step" "rc=$rc: $(printf '%s' "$out" | tail -2 | tr '\n' ' ')"
+says "the failure says the content was not read" "content was not read"
+out=$(cd "$R" && PATH="$T:$PATH" RUNNER_TEMP="$T" EVENT=workflow_dispatch BASE="" HEAD_SHA="" BEFORE="" SHA="$(git rev-parse HEAD)" PATTERNS="$P" bash "$T/scrub.sh" 2>&1); rc=$?
+[ "$rc" = 1 ] && pass "a failing git grep fails the step" || fail "a failing git grep fails the step" "rc=$rc: $(printf '%s' "$out" | tail -2 | tr '\n' ' ')"
+rm -f "$T/git"
+
 echo
 [ "$fails" = 0 ] && echo "all passed" || echo "$fails failed"
 [ "$fails" = 0 ]

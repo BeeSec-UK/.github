@@ -727,7 +727,7 @@ jobs:
           # read it: tests/scrub.test.sh compares the two on a machine that has the
           # CLI and skips the comparison in CI, so a drift is caught by hand.
           PRIVATE_SHAPED='_private/|findings-brain\.json|\.pem$|\.key$|id_rsa|secrets\.md'
-          list=$(mktemp -p "$RUNNER_TEMP"); trap 'rm -f "$list"' EXIT
+          list=$(mktemp -p "$RUNNER_TEMP"); raw=$(mktemp -p "$RUNNER_TEMP"); trap 'rm -f "$list" "$raw"' EXIT
           # One fixed string per line. CR and surrounding blanks are stripped, and a
           # blank line is dropped, because an empty fixed string matches every line.
           printf '%s\n' "${PATTERNS:-}" | tr -d '\r' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -v '^$' > "$list" || true
@@ -811,13 +811,19 @@ jobs:
           # the pattern, so a hit does not copy client data into the log.
           case "$mode" in
             diff)
+              # --text, because a .gitattributes in the change can mark a file
+              # -diff or binary, and git would then print no lines to read.
+              # The diff goes to a file first, so a git failure stops the step
+              # instead of reaching awk as an empty diff with no hits.
+              git diff -U0 --text --no-renames --no-color --no-ext-diff "$from" "$to" > "$raw" \
+                || { echo "::error::client-data scrub: git diff failed, so the content was not read"; exit 1; }
               # The lines the range adds. The hunk header gives each added line's
               # number in the new file, and the counts say where a hunk ends, so an
               # added line that itself starts with "++" is not taken for a file header.
               while IFS= read -r at; do
                 [ -n "$at" ] || continue
                 annotate "${at%:*}" "${at##*:}"
-              done < <(git diff -U0 --no-renames --no-color --no-ext-diff "$from" "$to" | awk '
+              done < <(awk '
                 FNR == NR { p[++n] = tolower($0); next }
                 remold > 0 || remnew > 0 {
                   c = substr($0, 1, 1)
@@ -835,12 +841,16 @@ jobs:
                   remold = (2 in o) ? o[2] + 0 : 1
                   remnew = (2 in nw) ? nw[2] + 0 : 1
                   ln = substr(nw[1], 2) + 0
-                }' "$list" -)
+                }' "$list" "$raw")
               ;;
             tree)
+              # --text for the same reason as the diff. git grep exits 1 when
+              # nothing matches and higher when it fails.
+              rc=0; git grep --text -n -i -F -f "$list" -z -- . > "$raw" || rc=$?
+              [ "$rc" -le 1 ] || { echo "::error::client-data scrub: git grep failed, so the content was not read"; exit 1; }
               while IFS= read -r -d '' f && IFS= read -r -d '' n && IFS= read -r _; do
                 annotate "$f" "$n"
-              done < <(git grep -I -n -i -F -f "$list" -z -- . || true)
+              done < "$raw"
               ;;
           esac
 
@@ -981,10 +991,6 @@ jobs:
           # every run for no extra safety once history is known clean.
           "$GL" dir . -c "$RUNNER_TEMP/gitleaks.toml" --no-banner --redact --exit-code 1
 
-      # Only when something is missing. A self-hosted runner keeps its
-      # packages between runs, so on every run after the first this was an
-      # apt-get update for nothing, and on a workstation runner without
-      # passwordless sudo it was the one step that could not run at all.
       # Client-data scrub, check 5 of docs/security-gate-plan.md. Fails on a
       # path `beesec pr` would refuse, and on a line naming a client from the
       # org secret CLIENT_SCRUB_PATTERNS, which this public repository cannot
@@ -1012,7 +1018,7 @@ jobs:
           # read it: tests/scrub.test.sh compares the two on a machine that has the
           # CLI and skips the comparison in CI, so a drift is caught by hand.
           PRIVATE_SHAPED='_private/|findings-brain\.json|\.pem$|\.key$|id_rsa|secrets\.md'
-          list=$(mktemp -p "$RUNNER_TEMP"); trap 'rm -f "$list"' EXIT
+          list=$(mktemp -p "$RUNNER_TEMP"); raw=$(mktemp -p "$RUNNER_TEMP"); trap 'rm -f "$list" "$raw"' EXIT
           # One fixed string per line. CR and surrounding blanks are stripped, and a
           # blank line is dropped, because an empty fixed string matches every line.
           printf '%s\n' "${PATTERNS:-}" | tr -d '\r' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -v '^$' > "$list" || true
@@ -1096,13 +1102,19 @@ jobs:
           # the pattern, so a hit does not copy client data into the log.
           case "$mode" in
             diff)
+              # --text, because a .gitattributes in the change can mark a file
+              # -diff or binary, and git would then print no lines to read.
+              # The diff goes to a file first, so a git failure stops the step
+              # instead of reaching awk as an empty diff with no hits.
+              git diff -U0 --text --no-renames --no-color --no-ext-diff "$from" "$to" > "$raw" \
+                || { echo "::error::client-data scrub: git diff failed, so the content was not read"; exit 1; }
               # The lines the range adds. The hunk header gives each added line's
               # number in the new file, and the counts say where a hunk ends, so an
               # added line that itself starts with "++" is not taken for a file header.
               while IFS= read -r at; do
                 [ -n "$at" ] || continue
                 annotate "${at%:*}" "${at##*:}"
-              done < <(git diff -U0 --no-renames --no-color --no-ext-diff "$from" "$to" | awk '
+              done < <(awk '
                 FNR == NR { p[++n] = tolower($0); next }
                 remold > 0 || remnew > 0 {
                   c = substr($0, 1, 1)
@@ -1120,12 +1132,16 @@ jobs:
                   remold = (2 in o) ? o[2] + 0 : 1
                   remnew = (2 in nw) ? nw[2] + 0 : 1
                   ln = substr(nw[1], 2) + 0
-                }' "$list" -)
+                }' "$list" "$raw")
               ;;
             tree)
+              # --text for the same reason as the diff. git grep exits 1 when
+              # nothing matches and higher when it fails.
+              rc=0; git grep --text -n -i -F -f "$list" -z -- . > "$raw" || rc=$?
+              [ "$rc" -le 1 ] || { echo "::error::client-data scrub: git grep failed, so the content was not read"; exit 1; }
               while IFS= read -r -d '' f && IFS= read -r -d '' n && IFS= read -r _; do
                 annotate "$f" "$n"
-              done < <(git grep -I -n -i -F -f "$list" -z -- . || true)
+              done < "$raw"
               ;;
           esac
 
@@ -1139,6 +1155,10 @@ jobs:
             echo "client-data scrub: no private-shaped path and no client named, $(wc -l < "$list") pattern(s)"
           fi
 
+      # Only when something is missing. A self-hosted runner keeps its
+      # packages between runs, so on every run after the first this was an
+      # apt-get update for nothing, and on a workstation runner without
+      # passwordless sudo it was the one step that could not run at all.
       - name: Install system packages
         if: inputs.apt_packages != '' && (needs.pick.outputs.api == 'true' || inputs.extra_gate_script != '')
         run: |
