@@ -233,7 +233,6 @@ run "a tree name with a newline fails" 1 workflow_dispatch "" "$P"
 says "the newline is escaped" "file=n%0Al.md,line=1::"
 if printf '%s\n' "$out" | grep -q '^l\.md'; then fail "no log line starts inside a path" "a name broke the line"; else pass "no log line starts inside a path"; fi
 
-
 # A .gitattributes in the change must not hide a hit: git prints no lines for a
 # file marked -diff or binary unless told --text.
 for a in '* -diff' '*.md binary'; do
@@ -250,6 +249,22 @@ out=$(cd "$R" && PATH="$T:$PATH" RUNNER_TEMP="$T" EVENT=pull_request BASE="$BASE
 says "the failure says the content was not read" "content was not read"
 out=$(cd "$R" && PATH="$T:$PATH" RUNNER_TEMP="$T" EVENT=workflow_dispatch BASE="" HEAD_SHA="" BEFORE="" SHA="$(git rev-parse HEAD)" PATTERNS="$P" bash "$T/scrub.sh" 2>&1); rc=$?
 [ "$rc" = 1 ] && pass "a failing git grep fails the step" || fail "a failing git grep fails the step" "rc=$rc: $(printf '%s' "$out" | tail -2 | tr '\n' ' ')"
+rm -f "$T/git"
+
+# A failure listing the names stops the step too. Paths only mode, a push with
+# no before, has nothing after the path half to fail instead.
+printf '#!/bin/sh\nfor a; do [ "$a" = ls-files ] || [ "$a" = --name-only ] && exit 128; done\nexec %s "$@"\n' "$(command -v git)" > "$T/git"; chmod +x "$T/git"
+mkrepo lsfail; mkdir -p "$R/_private"; printf 'x\n' > "$R/_private/x.md"; commit
+out=$(cd "$R" && PATH="$T:$PATH" RUNNER_TEMP="$T" EVENT=push BASE="" HEAD_SHA="" BEFORE="" SHA="$(git rev-parse HEAD)" PATTERNS="$P" bash "$T/scrub.sh" 2>&1); rc=$?
+[ "$rc" = 1 ] && pass "a failing git ls-files fails a paths-only push" || fail "a failing git ls-files fails a paths-only push" "rc=$rc: $(printf '%s' "$out" | tail -2 | tr '\n' ' ')"
+says "the failure says the paths were not read" "paths were not read"
+out=$(cd "$R" && PATH="$T:$PATH" RUNNER_TEMP="$T" EVENT=workflow_dispatch BASE="" HEAD_SHA="" BEFORE="" SHA="$(git rev-parse HEAD)" PATTERNS="$P" bash "$T/scrub.sh" 2>&1); rc=$?
+[ "$rc" = 1 ] && pass "a failing git ls-files fails a tree run" || fail "a failing git ls-files fails a tree run" "rc=$rc"
+says "a tree run says the paths were not read" "paths were not read"
+mkrepo namefail; printf 'new\n' > "$R/notes.md"; commit
+out=$(cd "$R" && PATH="$T:$PATH" RUNNER_TEMP="$T" EVENT=pull_request BASE="$BASE" HEAD_SHA="$(git rev-parse HEAD)" BEFORE="$BASE" SHA="$(git rev-parse HEAD)" PATTERNS="$P" bash "$T/scrub.sh" 2>&1); rc=$?
+[ "$rc" = 1 ] && pass "a failing git diff --name-only fails a PR" || fail "a failing git diff --name-only fails a PR" "rc=$rc"
+says "a PR says the paths were not read" "paths were not read"
 rm -f "$T/git"
 
 echo
