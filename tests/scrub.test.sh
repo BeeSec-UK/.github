@@ -242,8 +242,9 @@ for a in '* -diff' '*.md binary'; do
 done
 
 # A git failure stops the step, never reads as an empty diff with no hits.
+# The stub fails the content diff, not the name list, which is tested below.
 mkrepo gitfail; printf 'new\n' > "$R/notes.md"; commit
-printf '#!/bin/sh\nfor a; do [ "$a" = diff ] || [ "$a" = grep ] && exit 128; done\nexec %s "$@"\n' "$(command -v git)" > "$T/git"; chmod +x "$T/git"
+printf '#!/bin/sh\nfor a; do [ "$a" = -U0 ] || [ "$a" = grep ] && exit 128; done\nexec %s "$@"\n' "$(command -v git)" > "$T/git"; chmod +x "$T/git"
 out=$(cd "$R" && PATH="$T:$PATH" RUNNER_TEMP="$T" EVENT=pull_request BASE="$BASE" HEAD_SHA="$(git rev-parse HEAD)" BEFORE="$BASE" SHA="$(git rev-parse HEAD)" PATTERNS="$P" bash "$T/scrub.sh" 2>&1); rc=$?
 [ "$rc" = 1 ] && pass "a failing git diff fails the step" || fail "a failing git diff fails the step" "rc=$rc: $(printf '%s' "$out" | tail -2 | tr '\n' ' ')"
 says "the failure says the content was not read" "content was not read"

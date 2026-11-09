@@ -727,7 +727,7 @@ jobs:
           # read it: tests/scrub.test.sh compares the two on a machine that has the
           # CLI and skips the comparison in CI, so a drift is caught by hand.
           PRIVATE_SHAPED='_private/|findings-brain\.json|\.pem$|\.key$|id_rsa|secrets\.md'
-          list=$(mktemp -p "$RUNNER_TEMP"); raw=$(mktemp -p "$RUNNER_TEMP"); trap 'rm -f "$list" "$raw"' EXIT
+          list=$(mktemp -p "$RUNNER_TEMP"); raw=$(mktemp -p "$RUNNER_TEMP"); out=$(mktemp -p "$RUNNER_TEMP"); trap 'rm -f "$list" "$raw" "$out"' EXIT
           # One fixed string per line. CR and surrounding blanks are stripped, and a
           # blank line is dropped, because an empty fixed string matches every line.
           printf '%s\n' "${PATTERNS:-}" | tr -d '\r' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -v '^$' > "$list" || true
@@ -794,11 +794,15 @@ jobs:
           else
             names=(git ls-files -z)
           fi
+          # To a file first, as the content is, so a git failure stops the step
+          # instead of reading as no names and no hits.
+          "${names[@]}" > "$out" \
+            || { echo "::error::client-data scrub: git could not list the names, so the paths were not read"; exit 1; }
           while IFS= read -r -d '' f; do
             [[ $f =~ $PRIVATE_SHAPED ]] || continue
             echo "::error file=$(prop "$f")::private-shaped path in the change: $(msg "$f")"
             hits=$((hits + 1))
-          done < <("${names[@]}")
+          done < "$out"
 
           # The path half needs no list, so it has run before this, as on a
           # Dependabot or fork PR, which gets no secret.
@@ -820,10 +824,7 @@ jobs:
               # The lines the range adds. The hunk header gives each added line's
               # number in the new file, and the counts say where a hunk ends, so an
               # added line that itself starts with "++" is not taken for a file header.
-              while IFS= read -r at; do
-                [ -n "$at" ] || continue
-                annotate "${at%:*}" "${at##*:}"
-              done < <(awk '
+              awk '
                 FNR == NR { p[++n] = tolower($0); next }
                 remold > 0 || remnew > 0 {
                   c = substr($0, 1, 1)
@@ -841,7 +842,12 @@ jobs:
                   remold = (2 in o) ? o[2] + 0 : 1
                   remnew = (2 in nw) ? nw[2] + 0 : 1
                   ln = substr(nw[1], 2) + 0
-                }' "$list" "$raw")
+                }' "$list" "$raw" > "$out" \
+                || { echo "::error::client-data scrub: awk failed, so the content was not read"; exit 1; }
+              while IFS= read -r at; do
+                [ -n "$at" ] || continue
+                annotate "${at%:*}" "${at##*:}"
+              done < "$out"
               ;;
             tree)
               # --text for the same reason as the diff. git grep exits 1 when
@@ -1018,7 +1024,7 @@ jobs:
           # read it: tests/scrub.test.sh compares the two on a machine that has the
           # CLI and skips the comparison in CI, so a drift is caught by hand.
           PRIVATE_SHAPED='_private/|findings-brain\.json|\.pem$|\.key$|id_rsa|secrets\.md'
-          list=$(mktemp -p "$RUNNER_TEMP"); raw=$(mktemp -p "$RUNNER_TEMP"); trap 'rm -f "$list" "$raw"' EXIT
+          list=$(mktemp -p "$RUNNER_TEMP"); raw=$(mktemp -p "$RUNNER_TEMP"); out=$(mktemp -p "$RUNNER_TEMP"); trap 'rm -f "$list" "$raw" "$out"' EXIT
           # One fixed string per line. CR and surrounding blanks are stripped, and a
           # blank line is dropped, because an empty fixed string matches every line.
           printf '%s\n' "${PATTERNS:-}" | tr -d '\r' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -v '^$' > "$list" || true
@@ -1085,11 +1091,15 @@ jobs:
           else
             names=(git ls-files -z)
           fi
+          # To a file first, as the content is, so a git failure stops the step
+          # instead of reading as no names and no hits.
+          "${names[@]}" > "$out" \
+            || { echo "::error::client-data scrub: git could not list the names, so the paths were not read"; exit 1; }
           while IFS= read -r -d '' f; do
             [[ $f =~ $PRIVATE_SHAPED ]] || continue
             echo "::error file=$(prop "$f")::private-shaped path in the change: $(msg "$f")"
             hits=$((hits + 1))
-          done < <("${names[@]}")
+          done < "$out"
 
           # The path half needs no list, so it has run before this, as on a
           # Dependabot or fork PR, which gets no secret.
@@ -1111,10 +1121,7 @@ jobs:
               # The lines the range adds. The hunk header gives each added line's
               # number in the new file, and the counts say where a hunk ends, so an
               # added line that itself starts with "++" is not taken for a file header.
-              while IFS= read -r at; do
-                [ -n "$at" ] || continue
-                annotate "${at%:*}" "${at##*:}"
-              done < <(awk '
+              awk '
                 FNR == NR { p[++n] = tolower($0); next }
                 remold > 0 || remnew > 0 {
                   c = substr($0, 1, 1)
@@ -1132,7 +1139,12 @@ jobs:
                   remold = (2 in o) ? o[2] + 0 : 1
                   remnew = (2 in nw) ? nw[2] + 0 : 1
                   ln = substr(nw[1], 2) + 0
-                }' "$list" "$raw")
+                }' "$list" "$raw" > "$out" \
+                || { echo "::error::client-data scrub: awk failed, so the content was not read"; exit 1; }
+              while IFS= read -r at; do
+                [ -n "$at" ] || continue
+                annotate "${at%:*}" "${at##*:}"
+              done < "$out"
               ;;
             tree)
               # --text for the same reason as the diff. git grep exits 1 when
