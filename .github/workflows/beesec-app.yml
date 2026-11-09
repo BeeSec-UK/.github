@@ -578,7 +578,9 @@ jobs:
               # the API's 300-file cap, or the run does everything.
               n=$(printf '%s' "$cmp" | jq -r 'if (.files|type)=="array" then (.files|length) else empty end' 2>/dev/null || echo "")
               if [ -n "$n" ] && [ "$n" -gt 0 ] && [ "$n" -lt 300 ] 2>/dev/null; then
-                files=$(printf '%s' "$cmp" | jq -r '.files[].filename')
+                # A renamed file counts under both names, so moving the params
+                # file or a workflow away still counts as touching it.
+                files=$(printf '%s' "$cmp" | jq -r '.files[] | .filename, (.previous_filename // empty)')
                 api=false; web=false; swa=false; narrowed=true
                 while IFS= read -r f; do
                   [ -z "$f" ] && continue
@@ -1214,8 +1216,10 @@ jobs:
           IAC_SUBSCRIPTION_ID: ${{ inputs.iac_subscription_id }}
         run: |
           set -euo pipefail
-          if ! [[ $IAC_PARAMS_FILE =~ ^[A-Za-z0-9._/-]+\.bicepparam$ ]] || [[ $IAC_PARAMS_FILE == /* ]] || [[ /$IAC_PARAMS_FILE/ == */../* ]]; then
-            echo "::error::iac_params_file must be a relative path inside the repository ending .bicepparam, of letters, digits, dot, dash, underscore and slash"
+          # The first character may not be a dash, because the factory's
+          # plan.sh hands the path to basename and sed as a bare argument.
+          if ! [[ $IAC_PARAMS_FILE =~ ^[A-Za-z0-9._][A-Za-z0-9._/-]*\.bicepparam$ ]] || [[ $IAC_PARAMS_FILE == /* ]] || [[ /$IAC_PARAMS_FILE/ == */../* ]]; then
+            echo "::error::iac_params_file must be a relative path inside the repository ending .bicepparam, of letters, digits, dot, dash, underscore and slash, not starting with a dash"
             exit 1
           fi
           if ! [[ $IAC_SUBSCRIPTION_NAME =~ ^[A-Za-z0-9-]*$ ]]; then

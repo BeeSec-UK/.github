@@ -143,6 +143,8 @@ P='infra/$(id).bicepparam' caller "a params path with a command substitution is 
 P='../other/dev.bicepparam' caller "a params path that climbs out of the repo is refused" 1 "" "$PIN_LINE"
 P='/etc/dev.bicepparam' caller "an absolute params path is refused" 1 "" "$PIN_LINE"
 P='infra/dev.json' caller "a params file that is not a .bicepparam is refused" 1 "" "$PIN_LINE"
+P='-x.bicepparam' caller "a params path starting with a dash is refused" 1 "" "$PIN_LINE"
+P='.infra/dev.bicepparam' caller "a params path starting with a dot is accepted" 0 app-stack-v1.8.4 "$PIN_LINE"
 N="propolis-dev'; Get-Process; '" caller "a subscription name with a quote is refused" 1 "" "$PIN_LINE"
 I='not-a-guid' caller "a subscription id that is not a GUID is refused" 1 "" "$PIN_LINE"
 jq -e '.version[0].step.env == {"IAC_PARAMS_FILE": "${{ inputs.iac_params_file }}", "IAC_SUBSCRIPTION_NAME": "${{ inputs.iac_subscription_name }}", "IAC_SUBSCRIPTION_ID": "${{ inputs.iac_subscription_id }}"}' "$T/wf.json" >/dev/null \
@@ -159,7 +161,8 @@ mkdir -p "$T/bin"
 cat > "$T/bin/curl" <<'EOF'
 #!/usr/bin/env bash
 if [ "$FILES" = ERROR ]; then echo '{"message":"Not Found"}'; exit 0; fi
-printf '%s\n' "$FILES" | jq -R . | jq -s '{files: map({filename: .})}'
+# A line "new<-old" is a rename.
+printf '%s\n' "$FILES" | jq -R 'split("<-") | if length > 1 then {filename: .[0], previous_filename: .[1]} else {filename: .[0]} end' | jq -s '{files: .}'
 EOF
 chmod +x "$T/bin/curl"
 run() {  # name expect-infra path_gates files [iac_params_file]
@@ -183,6 +186,8 @@ run "a change to the params file outside infra/ says infra=true" true true $'dep
 run "a params file given as ./path still matches" true true 'deploy/dev.bicepparam' './deploy/dev.bicepparam'
 run "a .github change outside workflows says infra=false" false true '.github/CODEOWNERS'
 run "another .bicepparam outside infra/ says infra=false" false true 'deploy/prod.bicepparam' 'deploy/dev.bicepparam'
+run "moving the params file away says infra=true" true true 'deploy/old.bicepparam<-deploy/dev.bicepparam' 'deploy/dev.bicepparam'
+run "moving a file out of infra/ says infra=true" true true 'attic/main.bicep<-infra/main.bicep'
 grep -q '^api=' "$T/out" && pass "the other outputs are still written" || fail "the other outputs are still written" "$(cat "$T/out")"
 
 echo
