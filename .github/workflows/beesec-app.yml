@@ -297,9 +297,12 @@ on:
       security_checks:
         description: >-
           Run the security checks of docs/security-gate-plan.md as steps in
-          the gate, or in pick when the gate is skipped: today the
-          client-data scrub and the Python security lint. Off by default
-          while their cost is measured.
+          the gate: today the client-data scrub and the Python security
+          lint. When the gate is skipped, the scrub runs in pick instead and
+          the lint does not run, so Python outside both halves' paths, such
+          as scripts/*.py, is linted only when a later push runs the gate,
+          which lints every tracked file. Off by default while their cost is
+          measured.
         type: boolean
         default: false
 
@@ -1206,8 +1209,10 @@ jobs:
           # A security suppression must say why, after its codes:
           # `# noqa: S603 the argument list is fixed above`, and the same for a
           # `# ruff: disable[S603]` range. A file-level `# ruff: noqa: S603` (or
-          # flake8) exempts the whole file, so it is refused outright. Ruff reads
-          # these in any case and spacing, so the match ignores both. A blanket
+          # flake8) exempts the whole file, so it is refused outright, anywhere on
+          # a line, because Ruff honours one after a UTF-8 byte-order mark and a
+          # false match only fails closed. Ruff reads these in any case and
+          # spacing, so the match ignores both. A blanket
           # `# noqa` or `# ruff: noqa` with no codes is PGH004's, below.
           bad=0
           refuse() {  # message, pattern
@@ -1223,7 +1228,7 @@ jobs:
           refuse "a '# ruff: disable[...]' of a security rule must give its reason after the bracket" \
             "#[[:space:]]*ruff[[:space:]]*:[[:space:]]*disable[[:space:]]*\\[([^]]*[^A-Z0-9])?S[0-9]+[^]]*\\][[:space:]]*\$"
           refuse "a file-level noqa may not exempt a security rule, so suppress it on its line with a reason" \
-            "^[[:space:]]*#[[:space:]]*(ruff|flake8)[[:space:]]*:[[:space:]]*noqa[[:space:]]*:[^#]*$SC"
+            "#[[:space:]]*(ruff|flake8)[[:space:]]*:[[:space:]]*noqa[[:space:]]*:[^#]*$SC"
 
           # The release archive is cached per runner, but the tool cache is shared by
           # every job on a self-hosted runner, so nothing in it is run as found. Each

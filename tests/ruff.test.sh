@@ -28,6 +28,13 @@ EOF
 
 # --- the workflow wiring --------------------------------------------------
 
+desc=$(python3 -c 'import sys, yaml; print(yaml.safe_load(open(sys.argv[1]))[True]["workflow_call"]["inputs"]["security_checks"]["description"])' "$WF" 2>/dev/null)
+case "$desc" in
+  *"or in pick when the gate is skipped"*) fail "security_checks says the lint runs in the gate only" "$desc" ;;
+  *"lint does not run"*) pass "security_checks says the lint runs in the gate only" ;;
+  *) fail "security_checks says the lint runs in the gate only" "no mention of the lint being gate-only: $desc" ;;
+esac
+
 jobs=$(jq -r '.job' "$T/steps.json" | sort | paste -sd, -)
 [ "$jobs" = gate ] && pass "the ruff step is in the gate only" || fail "the ruff step is in the gate only" "found in '$jobs'"
 s=$(jq -c 'select(.job == "gate") | .step' "$T/steps.json")
@@ -145,6 +152,12 @@ mkrepo file2; printf '# flake8: noqa: S307\na = eval("1")\n' > "$R/api/new.py"; 
 run "a file-level flake8 noqa of a security rule fails" 1 pull_request "$BASE"
 mkrepo file3; printf 'x = 1\n#ruff:NOQA:E501,S307 the input is a literal\na = eval("1")\n' > "$R/api/new.py"; commit
 run "a file-level security noqa fails even with a reason, in any case and spacing" 1 pull_request "$BASE"
+# Not anchored to the line start, so a trailing one or one after a UTF-8
+# byte-order mark is refused too. A false match only fails closed.
+mkrepo file5; printf 'x = 1  # ruff: noqa: S307\na = eval("1")\n' > "$R/api/new.py"; commit
+run "a trailing file-level security noqa fails" 1 pull_request "$BASE"
+mkrepo file6; printf '\xef\xbb\xbf# ruff: noqa: S307\na = eval("1")\n' > "$R/api/new.py"; commit
+run "a file-level security noqa after a byte-order mark fails" 1 pull_request "$BASE"
 mkrepo file4; printf '# ruff: noqa: E501\na = 1\n' > "$R/api/new.py"; commit
 run "a file-level noqa of a non-security rule passes" 0 pull_request "$BASE"
 # A range suppression is held to the line rule: it must say why.
@@ -230,6 +243,11 @@ if [ -s "$REAL/ruff.tgz" ] && [ "$(sha256sum "$REAL/ruff.tgz" | cut -d' ' -f1)" 
   run "real ruff with an upper-case security NOQA and no reason fails" 1 pull_request "$BASE"
   mkrepo realfile; printf '# ruff: noqa: S307\na = eval("1")\n' > "$R/api/new.py"; commit
   run "real ruff with a file-level security noqa fails" 1 pull_request "$BASE"
+  mkrepo realfiletrail; printf 'x = 1  # ruff: noqa: S307\na = eval("1")\n' > "$R/api/new.py"; commit
+  run "real ruff with a trailing file-level security noqa fails" 1 pull_request "$BASE"
+  # Ruff reads a file-level noqa after a byte-order mark as exempting the file.
+  mkrepo realfilebom; printf '\xef\xbb\xbf# ruff: noqa: S307\na = eval("1")\n' > "$R/api/new.py"; commit
+  run "real ruff with a file-level security noqa after a byte-order mark fails" 1 pull_request "$BASE"
   mkrepo realfileblanket; printf '# ruff: noqa\na = eval("1")\n' > "$R/api/new.py"; commit
   run "real ruff fails a blanket file-level ruff noqa" 1 pull_request "$BASE"
   says "through PGH004" "PGH004"
