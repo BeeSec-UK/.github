@@ -1236,12 +1236,33 @@ jobs:
               elif until > limit:
                   bad.append(f"{what} runs to {until}, more than 90 days away (latest {limit})")
 
+          # osv-scanner decodes the config with BurntSushi/toml, which matches a key
+          # to its field in any case, so `[[ignoredvulns]]` or `IGNORE = true` is
+          # honoured. Every key is read here in the same way, and two keys that
+          # differ only in case are refused rather than guessed between.
+          def fold(v, where):
+              if isinstance(v, list):
+                  return [fold(x, where) for x in v]
+              if not isinstance(v, dict):
+                  return v
+              out = {}
+              for k, x in v.items():
+                  f = k.casefold()
+                  if f in out:
+                      bad.append(f"{where} has keys that differ only in case ({k})")
+                  out[f] = fold(x, where)
+              return out
+
           def ignores(o):
               # osv-scanner v2: ignore drops the package, vulnerability.ignore its
               # advisories and license.ignore its licence check.
               return any(t is True for t in (o.get("ignore"),
                                               (o.get("vulnerability") or {}).get("ignore"),
                                               (o.get("license") or {}).get("ignore")))
+
+          # The top-level keys osv-scanner 2.7.0 reads. Any other is refused, so a
+          # field a later release adds cannot get past these rules unread.
+          KNOWN = {"ignoredvulns", "packageoverrides", "goversionoverride"}
 
           for path in sys.argv[1:]:
               try:
@@ -1250,25 +1271,28 @@ jobs:
               except (OSError, tomllib.TOMLDecodeError) as e:
                   bad.append(f"{path}: cannot be read as TOML ({e})")
                   continue
-              for i, v in enumerate(cfg.get("IgnoredVulns", []), 1):
+              cfg = fold(cfg, path)
+              for k in sorted(set(cfg) - KNOWN):
+                  bad.append(f"{path}: {k} is not a key this check knows, so it is refused rather than left unread")
+              for i, v in enumerate(cfg.get("ignoredvulns", []), 1):
                   what = f"{path}: IgnoredVulns {v.get('id', f'#{i}')}"
                   if not str(v.get("reason", "")).strip():
                       bad.append(f"{what} has no reason")
-                  expiry(what, v.get("ignoreUntil"), "ignoreUntil")
+                  expiry(what, v.get("ignoreuntil"), "ignoreUntil")
               # An override with no name, or a name that is a pattern, covers a
               # whole ecosystem, so each must name one package. One that ignores
               # is an ignore and runs out within 90 days like the rest.
-              for i, o in enumerate(cfg.get("PackageOverrides", []), 1):
+              for i, o in enumerate(cfg.get("packageoverrides", []), 1):
                   name = str(o.get("name", "")).strip()
                   what = f"{path}: PackageOverrides {name or f'#{i}'}"
                   if not str(o.get("reason", "")).strip():
                       bad.append(f"{what} has no reason")
                   if not name:
                       bad.append(f"{what} names no package, so it would cover a whole ecosystem")
-                  if o.get("nameIsRegex") is True:
+                  if o.get("nameisregex") is True:
                       bad.append(f"{what} uses nameIsRegex, so it could cover any package")
                   if ignores(o):
-                      expiry(what, o.get("effectiveUntil"), "effectiveUntil")
+                      expiry(what, o.get("effectiveuntil"), "effectiveUntil")
           for b in bad:
               print(f"::error file={b.split(':', 1)[0]}::{b}")
           sys.exit(1 if bad else 0)
@@ -1322,15 +1346,16 @@ jobs:
           # Exit 0 is clean, 1 a vulnerability or a licence outside the allowlist,
           # 128 lockfiles with no packages in them. Anything else, an unreachable
           # database above all, is tried once more and then fails (decision D). An
-          # exit 0 with a database error in the log is a failure too, so the check
-          # can never pass on a scan that did not happen.
+          # extraction error in the log fails the same way whatever the exit code,
+          # 0 or 128 included, so the check never passes on a scan that did not
+          # happen. Exit 1 still fails as a finding.
           log=$(mktemp -p "$RUNNER_TEMP" osv.XXXXXX.log)
           for attempt in 1 2; do
             rc=0
             "$OSV" "${args[@]}" > "$log" 2>&1 || rc=$?
             cat "$log"
-            if grep -q '^Error during extraction' "$log"; then
-              [ "$rc" = 0 ] && rc=127
+            if grep -q '^Error during extraction' "$log" && [ "$rc" != 1 ]; then
+              rc=127
             fi
             case "$rc" in
               0|128) echo "osv-scanner: no known vulnerability and no licence outside the allowlist in ${#locks[@]} lockfile(s)"; exit 0 ;;

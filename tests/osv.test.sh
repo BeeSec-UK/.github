@@ -59,7 +59,8 @@ VER=$(printf '%s\n' "$script" | sed -n 's/^ *VER=\(\S*\)$/\1/p')
 
 # The stub records its arguments and answers as $OSV_MODE says:
 # clean, vulns, nopkgs, down (always 127), flaky (127 once, then clean), or
-# silent (exit 0 having failed to reach the database, as a log line says).
+# silent (exit 0 having failed to reach the database, as a log line says), or
+# extract128 (every lockfile failed to extract, so no package sources, 128).
 mkdir -p "$T/bin"
 cat > "$T/osv-stub" <<'EOF'
 #!/usr/bin/env bash
@@ -72,6 +73,7 @@ case "$OSV_MODE" in
   down)   echo "Error during extraction: (extracting as vulnmatch/osvdev) max retries exceeded"; exit 127 ;;
   flaky)  if [ "$(grep -c . "$OSV_CALLS")" -lt 2 ]; then echo "Error during extraction: down"; exit 127; fi; echo "No issues found"; exit 0 ;;
   silent) echo "Error during extraction: (extracting as vulnmatch/osvdev) max retries exceeded"; echo "No issues found"; exit 0 ;;
+  extract128) echo "Error during extraction: (extracting as python/requirements) bad line"; echo "No package sources found"; exit 128 ;;
 esac
 EOF
 chmod +x "$T/osv-stub"
@@ -143,6 +145,8 @@ run "an unreachable database fails" 1 down
 [ "$(calls)" -ge 2 ] && pass "after trying again" || fail "after trying again" "$(calls) calls"
 run "a database that comes back on the retry passes" 0 flaky
 run "an exit 0 after a database error fails" 1 silent
+run "an exit 128 after an extraction error fails" 1 extract128
+[ "$(calls)" -ge 2 ] && pass "after trying again" || fail "after trying again" "$(calls) calls"
 
 # Ignores. Every [[IgnoredVulns]] needs a reason and an ignoreUntil at most
 # 90 days away, and every [[PackageOverrides]] a reason and a name.
@@ -227,6 +231,36 @@ nameIsRegex = true
 ecosystem = \"PyPI\"
 license.override = [\"MIT\"]
 reason = \"x\""
+# osv-scanner reads its config keys in any case, at the top level and inside
+# an entry, so the check does too, and it refuses a top-level key it does not
+# know rather than let a new field past.
+policy "a lower-case ignoredvulns with no reason fails" 1 "[[ignoredvulns]]
+id = \"GHSA-aaaa-bbbb-cccc\"
+ignoreUntil = $(ahead 30)"
+policy "a lower-case packageoverrides ignore with no reason or expiry fails" 1 "[[packageoverrides]]
+name = \"django\"
+ignore = true"
+policy "an upper-case IGNORE inside an override with no effectiveUntil fails" 1 "[[PackageOverrides]]
+name = \"django\"
+IGNORE = true
+reason = \"x\""
+policy "a NameIsRegex inside an override fails" 1 "[[PackageOverrides]]
+name = \".*\"
+NameIsRegex = true
+license.override = [\"MIT\"]
+reason = \"x\""
+policy "keys that differ only in case fail" 1 "[[IgnoredVulns]]
+id = \"GHSA-aaaa-bbbb-cccc\"
+ignoreUntil = $(ahead 30)
+reason = \"x\"
+REASON = \"\""
+policy "an unknown top-level key fails" 1 "[[IgnoredVuln]]
+id = \"GHSA-aaaa-bbbb-cccc\""
+policy "a reasoned lower-case ignore within 90 days passes" 0 "[[ignoredvulns]]
+id = \"GHSA-aaaa-bbbb-cccc\"
+ignoreuntil = $(ahead 30)
+reason = \"short\""
+policy "a GoVersionOverride alone passes" 0 "GoVersionOverride = \"1.22.0\""
 policy "an unreadable osv-scanner.toml fails" 1 "[[IgnoredVulns]
 id = "
 
@@ -280,6 +314,13 @@ if command -v osv-scanner-real >/dev/null; then
   mkrepo realgpl; echo 'mysqlclient==2.2.0' > "$R/requirements.txt"; track
   STEP="$T/step-real.sh" run "real osv-scanner fails a GPL-2.0 package" 1 x
   says "and names the licence" "GPL-2.0"
+  # The scanner honours a lower-case [[packageoverrides]], so the check must
+  # read one: unreasoned it fails before the scan, reasoned it hides django.
+  mkrepo reallower; echo 'django==2.0.0' > "$R/requirements.txt"; printf '[[packageoverrides]]\nname = "django"\necosystem = "PyPI"\nignore = true\n' > "$R/osv-scanner.toml"; track
+  STEP="$T/step-real.sh" run "real osv-scanner: a lower-case packageoverrides with no reason fails" 1 x
+  says "and the check names it" "has no reason"
+  mkrepo reallowerok; echo 'django==2.0.0' > "$R/requirements.txt"; printf '[[packageoverrides]]\nname = "django"\necosystem = "PyPI"\nignore = true\neffectiveUntil = %s\nreason = "test"\n' "$(ahead 30)" > "$R/osv-scanner.toml"; track
+  STEP="$T/step-real.sh" run "real osv-scanner honours a reasoned lower-case packageoverrides" 0 x
 else
   echo "SKIP  real osv-scanner (no osv-scanner-real on PATH)"
 fi
