@@ -17,6 +17,7 @@ app's own repository, and nothing here can reach it. Fixing the stub stops
 the next app from inheriting the gap; it does not fix the apps that already
 have it.
 """
+import os
 import sys
 
 import yaml
@@ -51,11 +52,13 @@ def main(path):
     check("deploys are held to main's own ref", deploys and not missing,
           "without a ref check: " + ", ".join(missing))
 
+    # The whole clause, ANDed in, not either word somewhere in the condition.
+    held = "&& (github.event_name == 'push' || github.event_name == 'workflow_dispatch')"
     loose = [n for n, j in deploys.items()
-             if "github.event_name == 'push'" not in str(j.get("if"))
-             and "github.event_name == 'workflow_dispatch'" not in str(j.get("if"))]
+             if held not in " ".join(str(j.get("if")).split())
+             or "pull_request" in str(j.get("if"))]
     check("deploys never run on a pull request", deploys and not loose,
-          "not held to push or dispatch: " + ", ".join(loose))
+          "not held to exactly push or dispatch: " + ", ".join(loose))
 
     # The stub is a comment. Read it as text, which is how an app author reads it.
     check("the documented stub filters no pull request by base",
@@ -73,14 +76,47 @@ def main(path):
           "the stub grants id-token above the jobs, which reaches the jobs a "
           "pull request runs")
 
+    # A called workflow's jobs get whatever the caller's job grants, and every
+    # job of this pipeline runs on a pull request. Placing id-token on the
+    # caller's job keeps nothing from the test jobs, so the stub must not say so.
+    for claim in ("which no pull request can reach",
+                  "including the jobs a pull request runs"):
+        check(f"the stub does not claim '{claim}'", claim not in text,
+              "a called workflow's jobs all get the pipeline job's permissions, "
+              "and that job runs on every pull request")
+
     check("the documented stub keeps secrets: inherit on the pipeline job",
           "#       secrets: inherit" in text,
           "the stub no longer shows where the secret store goes, which is the "
           "job whose deploys are the only user of it")
 
+    template(os.path.join(os.path.dirname(path), "..", "..",
+                          "workflow-templates", "beesec-app.yml"))
+
     print()
     print("all checks passed" if not fails else f"{len(fails)} check(s) failed")
     return len(fails)
+
+
+def template(path):
+    """The starter GitHub offers for a new app workflow, which is what new
+    apps actually copy, held to the same rules as the stub."""
+    doc = yaml.safe_load(open(path))
+    # PyYAML reads the bare key `on` as True.
+    on = doc.get("on", doc.get(True)) or {}
+    pr = on.get("pull_request") or {}
+    check("the template filters no pull request by base", "branches" not in pr,
+          f"pull_request still has branches: {pr.get('branches')}")
+    check("the template names all four pull request types",
+          sorted(pr.get("types") or []) == sorted(["opened", "synchronize", "reopened", "edited"]),
+          f"types: {pr.get('types')}")
+    check("the template grants no top-level id-token",
+          "id-token" not in (doc.get("permissions") or {}),
+          "permissions at the top level still grant id-token")
+    job = (doc.get("jobs") or {}).get("pipeline") or {}
+    check("the template keeps id-token on the pipeline job",
+          (job.get("permissions") or {}).get("id-token") == "write",
+          "run-from-package and flex need it on the pipeline job")
 
 
 if __name__ == "__main__":
