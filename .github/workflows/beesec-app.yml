@@ -23,17 +23,34 @@
 #   name: Deploy <app>
 #   on:
 #     push: { branches: [main] }
-#     pull_request: { branches: [main] }
+#     # No base filter. With `branches: [main]` a pull request stacked on
+#     # another branch runs nothing and shows an empty check list, which reads
+#     # like a pass rather than like an absence, so the reviewer cannot approve
+#     # it and the stack stalls. `edited` because a retarget is an edited
+#     # event: a request moved onto main is then tested against main instead of
+#     # keeping the checks it earned against its old base, where a skip counts
+#     # as a pass. Naming types replaces the defaults, so all four are listed.
+#     # The cost: `edited` also fires on a title or description edit, and each
+#     # one is a full test run that cancels the run in progress.
+#     pull_request: { types: [opened, synchronize, reopened, edited] }
 #     workflow_dispatch:
+#   # id-token sits on the pipeline job, not at the top level. That is tidying
+#   # only: every job of this shared workflow, the tests included, gets what
+#   # the pipeline job grants, and that job runs on every pull request. What
+#   # keeps a pull request from deploying is Azure trusting only main's subject
+#   # and each deploy job's check for a push or dispatch on main.
 #   permissions:
 #     contents: read
-#     id-token: write      # only needed for api_deploy_mode: run-from-package or flex
 #   concurrency:
 #     group: ${{ github.workflow }}-${{ github.ref }}
 #     cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 #   jobs:
 #     pipeline:
+#       # id-token only for run-from-package or flex; leave it out otherwise.
+#       permissions: { contents: read, id-token: write }
 #       uses: BeeSec-UK/.github/.github/workflows/beesec-app.yml@main
+#       # The whole secret store. This job runs on pull requests too, so the
+#       # deploy jobs' own conditions are what keep the deploy secrets unused there.
 #       secrets: inherit
 #       with:
 #         function_app: func-<app>-prod
@@ -1003,6 +1020,7 @@ jobs:
       && (needs.gate_web.result == 'success' || needs.gate_web.result == 'skipped')
       && needs.pick.outputs.deploy_web == 'true'
       && inputs.deploy_swa && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+      && github.ref == 'refs/heads/main'
     runs-on: ${{ fromJSON(needs.pick.outputs.labels) }}
     # ~1.8 min normally. See the note on `gate` for why this exists.
     timeout-minutes: 15
@@ -1130,6 +1148,7 @@ jobs:
       && (needs.gate_web.result == 'success' || needs.gate_web.result == 'skipped')
       && needs.pick.outputs.deploy_api == 'true'
       && inputs.deploy_api && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+      && github.ref == 'refs/heads/main'
     runs-on: ${{ fromJSON(needs.pick.outputs.labels) }}
     # ~1.6 min normally. See the note on `gate` for why this exists.
     timeout-minutes: 15
