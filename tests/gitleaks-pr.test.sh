@@ -62,9 +62,9 @@ b=$(jq -c 'select(.job == "gate" and .step) | .step | {run, env}' "$T/steps.json
 
 script=$(jq -r 'select(.job == "gate" and .step) | .step.run' "$T/steps.json")
 [ -n "$script" ] || { echo "FAIL  no gate gitleaks_pr script to run"; echo "$fails failed"; exit 1; }
-# The step reads the config the dir-scan step before it fetched. Point that
-# one path at this test's own copy.
-printf '%s\n' "$script" | sed "s#/tmp/gitleaks.toml#$T/gitleaks.toml#g" > "$T/step.sh"
+# The step reads the config the dir-scan step before it fetched into
+# RUNNER_TEMP, which is this test's own directory.
+printf '%s\n' "$script" > "$T/step.sh"
 printf '[extend]\nuseDefault = true\n' > "$T/gitleaks.toml"
 
 VER=$(printf '%s\n' "$script" | sed -n 's/^ *VER=\(\S*\)$/\1/p')
@@ -106,7 +106,7 @@ checkout() {
   git clone -q --depth=1 --no-local --branch pr "file://$R.origin" "$R" 2>/dev/null
 }
 run() {  # name expect [COMMITS override]
-  out=$(cd "$R" && RUNNER_TOOL_CACHE="$CACHE" GL_ARGS="$T/args" EVENT=pull_request BASE="$BASE" PR_HEAD="$HEADSHA" COMMITS="${3:-$N}" bash "$T/step.sh" 2>&1); rc=$?
+  out=$(cd "$R" && RUNNER_TEMP="$T" RUNNER_TOOL_CACHE="$CACHE" GL_ARGS="$T/args" EVENT=pull_request BASE="$BASE" PR_HEAD="$HEADSHA" COMMITS="${3:-$N}" bash "$T/step.sh" 2>&1); rc=$?
   if [ "$rc" = "$2" ]; then pass "$1"; else fail "$1" "rc=$rc, expected $2: $(printf '%s' "$out" | tail -3 | tr '\n' ' ')"; fi
 }
 
@@ -147,7 +147,7 @@ mkrepo badbase; pr_commit "x = 1"; checkout; BASE="not-a-sha"
 run "a malformed base fails" 1
 
 mkrepo nobin; pr_commit "x = 1"; checkout
-out=$(cd "$R" && RUNNER_TOOL_CACHE="$T/empty" GL_ARGS="$T/args" EVENT=pull_request BASE="$BASE" PR_HEAD="$HEADSHA" COMMITS="$N" bash "$T/step.sh" 2>&1); rc=$?
+out=$(cd "$R" && RUNNER_TEMP="$T" RUNNER_TOOL_CACHE="$T/empty" GL_ARGS="$T/args" EVENT=pull_request BASE="$BASE" PR_HEAD="$HEADSHA" COMMITS="$N" bash "$T/step.sh" 2>&1); rc=$?
 [ "$rc" != 0 ] && pass "a missing gitleaks binary fails" || fail "a missing gitleaks binary fails" "rc=$rc"
 
 # gitleaks 8.28.0 exits 0 when git errors under it, having scanned nothing.

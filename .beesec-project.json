@@ -1,0 +1,7 @@
+{
+  "kind": "dev",
+  "name": ".github",
+  "primary_goal": "Every BeeSec-UK repository gets its tests, deploy and pull-request checks from one reusable workflow here, on the org's own runners, so a fix made once reaches every caller on its next run and no run spends a GitHub-hosted minute.",
+  "acceptance": "A push to main in a beesec-app.yml caller runs pick, gate and both deploys on beesec-dev and the smoke test passes, and a pull request with an empty What it does section fails pr-sections on beesec-preflight.",
+  "drafted": true
+}
