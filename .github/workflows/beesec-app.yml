@@ -30,12 +30,15 @@
 #     # event: a request moved onto main is then tested against main instead of
 #     # keeping the checks it earned against its old base, where a skip counts
 #     # as a pass. Naming types replaces the defaults, so all four are listed.
+#     # The cost: `edited` also fires on a title or description edit, and each
+#     # one is a full test run that cancels the run in progress.
 #     pull_request: { types: [opened, synchronize, reopened, edited] }
 #     workflow_dispatch:
-#   # No id-token at the top level: a top-level grant hands one to every job,
-#   # including the jobs a pull request runs. The pipeline job needs it only
-#   # for api_deploy_mode run-from-package or flex, and its deploy jobs are
-#   # held to a push on main, so grant it on that job rather than here.
+#   # id-token sits on the pipeline job, not at the top level. That is tidying
+#   # only: every job of this shared workflow, the tests included, gets what
+#   # the pipeline job grants, and that job runs on every pull request. What
+#   # keeps a pull request from deploying is Azure trusting only main's subject
+#   # and each deploy job's check for a push or dispatch on main.
 #   permissions:
 #     contents: read
 #   concurrency:
@@ -46,8 +49,8 @@
 #       # id-token only for run-from-package or flex; leave it out otherwise.
 #       permissions: { contents: read, id-token: write }
 #       uses: BeeSec-UK/.github/.github/workflows/beesec-app.yml@main
-#       # The whole secret store, so this must stay a job whose deploys are
-#       # the only things that use it and which no pull request can reach.
+#       # The whole secret store. This job runs on pull requests too, so the
+#       # deploy jobs' own conditions are what keep the deploy secrets unused there.
 #       secrets: inherit
 #       with:
 #         function_app: func-<app>-prod
