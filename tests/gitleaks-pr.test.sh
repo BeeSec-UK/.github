@@ -106,7 +106,7 @@ checkout() {
   git clone -q --depth=1 --no-local --branch pr "file://$R.origin" "$R" 2>/dev/null
 }
 run() {  # name expect [COMMITS override]
-  out=$(cd "$R" && RUNNER_TEMP="$T" RUNNER_TOOL_CACHE="$CACHE" GL_ARGS="$T/args" EVENT=pull_request BASE="$BASE" PR_HEAD="$HEADSHA" COMMITS="${3:-$N}" bash "$T/step.sh" 2>&1); rc=$?
+  out=$(cd "$R" && RUNNER_TEMP="$T" RUNNER_TOOL_CACHE="$CACHE" GL_ARGS="$T/args" BASE="$BASE" PR_HEAD="$HEADSHA" COMMITS="${3:-$N}" bash "$T/step.sh" 2>&1); rc=$?
   if [ "$rc" = "$2" ]; then pass "$1"; else fail "$1" "rc=$rc, expected $2: $(printf '%s' "$out" | tail -3 | tr '\n' ' ')"; fi
 }
 
@@ -139,6 +139,18 @@ printf 'later\n' > "$R.origin/other.py"; git -C "$R.origin" add -A; git -C "$R.o
 BASE=$(git -C "$R.origin" rev-parse HEAD); git -C "$R.origin" switch -q pr; checkout; N=1
 run "a PR behind a moved base scans only its own commits" 0
 
+# A self-hosted runner can keep shallow entries from an earlier run. One that
+# names a PR commit must not quietly drop that commit from the range.
+# A git on PATH that leaves the entry behind after the step's fetches, as a
+# reused workspace would, so the step's own range is what is tested.
+mkrepo stale; pr_commit "x = 1"; pr_commit "k = FAKESECRET"; pr_commit "y = 2"; checkout
+STALE=$(git -C "$R.origin" rev-parse HEAD~1); mkdir -p "$T/stalebin"
+printf '#!/bin/sh\n%s "$@" || exit $?\nfor a; do [ "$a" = fetch ] && %s cat-file -e %s 2>/dev/null && { echo %s >> "$(%s rev-parse --git-path shallow)"; break; }; done\nexit 0\n' \
+  "$(command -v git)" "$(command -v git)" "$STALE" "$STALE" "$(command -v git)" > "$T/stalebin/git"; chmod +x "$T/stalebin/git"
+PATH_SAVED=$PATH; PATH="$T/stalebin:$PATH"
+run "a stale shallow entry inside the PR fails rather than hide a commit" 1
+PATH=$PATH_SAVED
+
 mkrepo badcount; pr_commit "x = 1"; checkout
 run "a non-numeric commit count fails" 1 "1; rm -rf /"
 run "a zero commit count fails" 1 "0"
@@ -147,7 +159,7 @@ mkrepo badbase; pr_commit "x = 1"; checkout; BASE="not-a-sha"
 run "a malformed base fails" 1
 
 mkrepo nobin; pr_commit "x = 1"; checkout
-out=$(cd "$R" && RUNNER_TEMP="$T" RUNNER_TOOL_CACHE="$T/empty" GL_ARGS="$T/args" EVENT=pull_request BASE="$BASE" PR_HEAD="$HEADSHA" COMMITS="$N" bash "$T/step.sh" 2>&1); rc=$?
+out=$(cd "$R" && RUNNER_TEMP="$T" RUNNER_TOOL_CACHE="$T/empty" GL_ARGS="$T/args" BASE="$BASE" PR_HEAD="$HEADSHA" COMMITS="$N" bash "$T/step.sh" 2>&1); rc=$?
 [ "$rc" != 0 ] && pass "a missing gitleaks binary fails" || fail "a missing gitleaks binary fails" "rc=$rc"
 
 # gitleaks 8.28.0 exits 0 when git errors under it, having scanned nothing.
@@ -170,7 +182,29 @@ if command -v gitleaks-real >/dev/null; then
   tok="ghp_$(head -c 400 /dev/urandom | tr -dc 'A-Za-z0-9' | head -c 36)"
   mkrepo real; printf 'token = "%s"\n' "$tok" > "$R.origin/conf.ini"
   git -C "$R.origin" add -A; git -C "$R.origin" commit -qm "pr: add"; git -C "$R.origin" rm -q conf.ini; git -C "$R.origin" commit -qm "pr: remove"; checkout
-  run "real gitleaks finds a removed AWS key in the PR's history" 1
+  run "real gitleaks finds a removed GitHub token in the PR's history" 1
+
+  # The PR's own .gitleaksignore must not let it wave its secret through.
+  mkrepo realignore; printf 'token = "%s"\n' "$tok" > "$R.origin/conf.ini"
+  git -C "$R.origin" add -A; git -C "$R.origin" commit -qm "pr: add"; added=$(git -C "$R.origin" rev-parse HEAD)
+  git -C "$R.origin" rm -q conf.ini; git -C "$R.origin" commit -qm "pr: remove"
+  printf '%s:conf.ini:github-pat:1\n' "$added" > "$R.origin/.gitleaksignore"
+  git -C "$R.origin" add -A; git -C "$R.origin" commit -qm "pr: ignore it"; checkout
+  run "a PR's own .gitleaksignore does not hide its secret" 1
+
+  # Nor an inline allow comment on the line itself.
+  mkrepo realallow; printf 'token = "%s" # gitleaks:allow\n' "$tok" > "$R.origin/conf.ini"
+  git -C "$R.origin" add -A; git -C "$R.origin" commit -qm "pr: add"; git -C "$R.origin" rm -q conf.ini; git -C "$R.origin" commit -qm "pr: remove"; checkout
+  run "a gitleaks:allow comment in the PR does not hide its secret" 1
+
+  # A secret that appears only in a merge commit's conflict resolution.
+  mkrepo realmerge; pr_commit "x = 1"
+  git -C "$R.origin" switch -q -c side HEAD~1; printf 'side\n' >> "$R.origin/app.py"; git -C "$R.origin" commit -qam "pr: side"
+  git -C "$R.origin" switch -q pr; git -C "$R.origin" merge -q side >/dev/null 2>&1 || true
+  printf 'base 1\nbase 2\nbase 3\ntoken = "%s"\n' "$tok" > "$R.origin/app.py"
+  git -C "$R.origin" add -A; git -C "$R.origin" commit -qm "pr: merge side"
+  printf 'base 1\nbase 2\nbase 3\n' > "$R.origin/app.py"; git -C "$R.origin" commit -qam "pr: remove"; checkout
+  run "a secret only in a merge's resolution fails" 1
 else
   echo "SKIP  real gitleaks (no gitleaks-real on PATH)"
 fi
