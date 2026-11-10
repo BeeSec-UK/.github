@@ -112,7 +112,7 @@ run() {  # name expect [COMMITS override]
 
 mkrepo clean; pr_commit "x = 1"; pr_commit "y = 2"; checkout
 run "a PR with no secret passes" 0
-grep -q -- "--log-opts=$BASE..$HEADSHA" "$T/args" \
+grep -qE -- "--log-opts=(--diff-merges=first-parent )?$BASE\.\.$HEADSHA( |$)" "$T/args" \
   && pass "gitleaks is given exactly the PR's range" \
   || fail "gitleaks is given exactly the PR's range" "args: $(cat "$T/args")"
 grep -qw -- "--redact" "$T/args" && pass "findings are redacted" || fail "findings are redacted" "no --redact in: $(cat "$T/args")"
