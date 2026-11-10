@@ -1,6 +1,6 @@
 # Plan: automated security on every PR in beesec-app.yml
 
-Status: decisions A to D answered by the operator on 29 October 2026, decision E open. Revised on 1 November after review: Bicep left to section 4, the ruleset's licence, history for pushes, merge-base history for PRs, and the files OSV reads. Revised on 2 November: pushes use the same merge-base loop, `gate_web` gets the history, every `swa_paths` change routes to the API half, and the pushes left to `pick` are stated in full. Revised again on 2 November: Semgrep's PR baseline is the merge commit's first parent, not the merge base, and the scrub secret's exposure is left open as decision E. Building it is a workflow change and needs the operator as maintainer.
+Status: decisions A to D answered by the operator on 29 October 2026, decision E on 9 November 2026. Revised on 1 November after review: Bicep left to section 4, the ruleset's licence, history for pushes, merge-base history for PRs, and the files OSV reads. Revised on 2 November: pushes use the same merge-base loop, `gate_web` gets the history, every `swa_paths` change routes to the API half, and the pushes left to `pick` are stated in full. Revised again on 2 November: Semgrep's PR baseline is the merge commit's first parent, not the merge base, and the scrub secret's exposure is left open as decision E. Building it is a workflow change and needs the operator as maintainer.
 
 This is step 1 of the review loop in orchestrator `standards/engineering-workflow.md` for step 4 of that loop. Every PR runs secret scanning, dependency and licence checks, static analysis, the IaC policy check and the client-data scrub with no person involved, and any finding fails the PR.
 
@@ -87,7 +87,7 @@ Times are estimates for one PR run on a GTX runner and are measured in step 1 of
 - **Content:** fail on any added line that matches a client pattern list. The list cannot live in this public repository. It is read at run time from an org secret, `CLIENT_SCRUB_PATTERNS`, which reaches the gate through `secrets: inherit`. The step reports only the file and line number, never the matched text, so a match never echoes client data into a log.
 - **Where:** gate, and the `pick` fallback, because a docs-only change is where pasted client data hides.
 - **Empty list:** an empty or missing `CLIENT_SCRUB_PATTERNS` fails the step, never passes it. Dependabot PRs do not receive Actions secrets, so they fail this step until the operator copies the secret into the Dependabot secrets as well. The path half still runs on them.
-- **Who can read the list:** a `pull_request` run takes its workflow from the PR's head, so anyone who can push a branch to a caller repository can edit the caller's workflow to print the secret. Those people are BeeSec staff with write access, who already handle the clients named in it. The secret is limited to the nine caller repositories, not the whole org. Decision B chose where the list lives and does not cover this exposure, so it is open as decision E below and nothing is built until the operator answers it.
+- **Who can read the list:** a `pull_request` run takes its workflow from the PR's head, so anyone who can push a branch to a caller repository can edit the caller's workflow to print the secret. Those people are BeeSec staff with write access, who already handle the clients named in it. The secret is limited to the nine caller repositories, not the whole org. Decision B chose where the list lives and does not cover this exposure, so it was put to the operator as decision E below. The operator accepted the exposure on 9 November 2026.
 - **Cost:** under 2 s. It is a `git diff` of the PR's range from section 1, `<merge-base>..<head>` on a PR and `<before>..<sha>` on a push, and a fixed-string grep. With no usable `before` on a push, it checks the paths only, which needs no history, and logs that the content half was skipped.
 - **False positives:** there is no inline override, because client data has no legitimate place in an app repository. A false match is fixed by changing the pattern list, which the operator owns. Fixtures use neutral, made-up engagement references.
 - **Source, decision B:** the list is the org secret above, which the operator owns and keeps current.
@@ -103,7 +103,7 @@ On a PR that touches both halves, the gate gains an estimated 30 to 90 s, of whi
 3. **Enforce:** remove `continue-on-error`, so any finding fails the PR. Make `security_checks` default on, and delete the three caller `plan` jobs.
 4. **Document:** update the README's inputs table and `ci.md`'s rules.
 
-Step 1 does not start until decision E is answered. Each step is its own PR in this repository, with the operator as maintainer. Steps 2 and 3 also touch the nine callers.
+Step 1 waited for decision E, which was answered on 9 November 2026. Each step is its own PR in this repository, with the operator as maintainer. Steps 2 and 3 also touch the nine callers.
 
 ## Not covered
 
@@ -112,10 +112,10 @@ Step 1 does not start until decision E is answered. Each step is its own PR in t
 
 ## Decisions
 
-The operator answered A to D on 29 October 2026. E is open.
+The operator answered A to D on 29 October 2026, and E on 9 November 2026.
 
 - A, the factory pin: `beesec-app.yml` pins the factory `plan` action at app-stack-v1.12.3 for every caller. The three IaC callers move to it when their own `plan` jobs are deleted.
 - B, the client pattern list: an org secret, `CLIENT_SCRUB_PATTERNS`, owned by the operator. The step reports file and line only, never the matched text.
 - C, shadow mode: yes. A week with every new step reporting and nothing failing, before enforcement.
 - D, an unreachable vulnerability database: the run fails, the same rule as gitleaks.
-- E, who can read the scrub list: open. Anyone who can push a branch to one of the nine caller repositories can make a `pull_request` run print `CLIENT_SCRUB_PATTERNS`. The operator either accepts that exposure explicitly, or narrows it, for example by holding the secret in a deployment environment that only main may use, so the content half runs after merge rather than on the PR.
+- E, who can read the scrub list: the exposure is accepted, and the scrub reads `CLIENT_SCRUB_PATTERNS` on `pull_request` runs. Anyone who can push a branch to one of the nine caller repositories can make such a run print the list. The lean was to accept, because the repositories are private, PRs come from org members, and forks never get secrets. The operator's answer on 9 November 2026, relayed by the orchestrator chat, was "follow leans on all decisions in the canvas". The alternative not taken was a deployment environment only main may use, which would run the content half after merge.
