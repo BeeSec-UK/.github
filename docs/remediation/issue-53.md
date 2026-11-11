@@ -70,4 +70,16 @@ There is no dev deploy of `.github` itself. The proof is in hivemind, the operat
 
 ## Execution plan
 
-Pending: written by the issue creator after peer review approves this plan.
+Written by the issue creator, the .github chat for pkcrisp, after the plan was approved at 645ccaa by the operator (queen approval 73352267) and by the peer reviewer. One work package per PR. Each `.github` PR is based on `main`, says `Refs #53`, and commits its failing test first.
+
+| ID | Outcome | Depends on | Owner | Model | h | Forecast tokens | Gate on dev |
+|---|---|---|---|---|---|---|---|
+| GH-fix-53.1 | `tests/pin.test.sh` committed, failing on checks 1 and 3 to 6 | – | github-1 | Opus | 0.5 | 1 M | pr-tests red on the branch, naming `workflow-templates/beesec-app.yml:33`, `beesec-app.yml:724` and `:873`, and the tag-pinned actions |
+| GH-fix-53.2 | Step 0 in `beesec-app.yml`: the gitleaks config as a heredoc, every third-party action pinned by commit, and `.github/dependabot.yml` | .1 | github-1 | Opus | 2 | 4 M | Checks 3 to 6 pass. After the merge, hivemind's next run, still at `@main`, passes pick and gate on `beesec-dev` and makes no request to `raw.githubusercontent.com` |
+| GH-fix-53.3 | The template and `roll-out-pr-sections.sh` write the pinned form, and `workflow-templates/dependabot.yml` exists | .2 | github-1 | Opus | 1 | 2 M | Checks 1, 2 and 6 pass against a `v1.0.0` tag on a scratch clone |
+| GH-fix-53.4 | `v1.0.0` tagged on the `main` commit after .3 merges, with release notes | .3 | pkcrisp | – | 0.25 | – | `gh api repos/BeeSec-UK/.github/tags` lists `v1.0.0` at that commit |
+| GH-fix-53.5 | hivemind pinned to `@<sha> # v1.0.0`, with its `dependabot.yml` | .4 | hivemind-1 | Opus | 1 | 2 M | hivemind's pipeline is green on `beesec-dev` at the pinned commit, and its dev deploy to `hivemind-dev` succeeds |
+| GH-fix-53.6 | The dev proof: `v1.0.1` tagged, Dependabot's bump PR in hivemind, and an untagged change not seen | .5 | pkcrisp tags, hivemind-1 proves | Opus | 1 | 2 M | The three points under Proof on dev, each captured on the issue |
+| GH-fix-53.7 | `pr-sections.yml` and `execution-plan.yml` on the same pattern | .6 | github-1 | Opus | 1 | 2 M | Checks 1 to 4 pass for both, and a hivemind PR runs pr-sections at the pinned commit |
+
+That is about 7 hours and 13 M tokens, inside a day. Each other app's caller change is routed to that app's chat by the orchestrator after .6, and is outside this plan.
