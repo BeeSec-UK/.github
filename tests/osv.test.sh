@@ -262,6 +262,17 @@ id = \"GHSA-aaaa-bbbb-cccc\"
 ignoreuntil = $(ahead 30)
 reason = \"short\""
 policy "a GoVersionOverride alone passes" 0 "GoVersionOverride = \"1.22.0\""
+# The check runs Python from the caller's checkout, so a tracked module at the
+# root must not stand in for the standard library's.
+mkrepo shadowmod; echo 'django==4.2.16' > "$R/requirements.txt"
+printf 'load = lambda f: {}\nclass TOMLDecodeError(Exception):\n    pass\n' > "$R/tomllib.py"
+printf '[[IgnoredVulns]]\nid = "x"\n' > "$R/osv-scanner.toml"; track
+run "a tomllib.py in the repo cannot stand in for the real one" 1 clean
+says "and the real one reads the entry" "has no reason"
+mkrepo shadowdt; echo 'django==4.2.16' > "$R/requirements.txt"
+printf 'raise SystemExit(0)\n' > "$R/datetime.py"
+printf '[[IgnoredVulns]]\nid = "x"\n' > "$R/osv-scanner.toml"; track
+run "a datetime.py in the repo cannot end the check early" 1 clean
 policy "an unreadable osv-scanner.toml fails" 1 "[[IgnoredVulns]
 id = "
 

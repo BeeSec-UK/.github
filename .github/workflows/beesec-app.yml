@@ -1205,13 +1205,15 @@ jobs:
             # every gate, so this finds one on the runner or says plainly why not.
             PY=""
             for p in python3 python3.14 python3.13 python3.12 python3.11; do
-              if command -v "$p" >/dev/null 2>&1 && "$p" -c 'import tomllib' >/dev/null 2>&1; then PY=$p; break; fi
+              if command -v "$p" >/dev/null 2>&1 && "$p" -I -c 'import tomllib' >/dev/null 2>&1; then PY=$p; break; fi
             done
             if [ -z "$PY" ]; then
               echo "::error::the osv-scanner.toml check needs Python 3.11 or newer for tomllib, and this runner has none on PATH. Install one on the runner; the check fails rather than skip the ignore rules."
               exit 1
             fi
-            "$PY" - "${configs[@]}" <<'PY'
+            # -I: this runs in the caller's checkout, so without it a tracked
+            # tomllib.py or datetime.py would be imported in place of the real one.
+            "$PY" -I - "${configs[@]}" <<'PY'
           import datetime, sys, tomllib
           today = datetime.datetime.now(datetime.timezone.utc).date()
           limit = today + datetime.timedelta(days=90)
