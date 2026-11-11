@@ -34,14 +34,14 @@ tar czf "$T/evil.tgz" -C "$T/evil" gitleaks
 TGZ_SHA=$(sha256sum "$T/good.tgz" | cut -d' ' -f1)
 BIN_SHA=$(sha256sum "$T/good/gitleaks" | cut -d' ' -f1)
 
-# curl serves $SERVE for the release and a minimal config for the TOML, and
-# notes each release download. sleep returns at once.
+# curl serves $SERVE for the release, notes each release download and fails
+# any other URL, the config included, since the step now writes it (#53).
+# sleep returns at once.
 cat > "$T/bin/curl" <<'EOF'
 #!/usr/bin/env bash
 out=
 while [ $# -gt 0 ]; do [ "$1" = -o ] && { out=$2; shift; }; url=$1; shift; done
 case "$url" in
-  *gitleaks.toml) echo '[allowlist]' > "$out" ;;
   *releases/download*) echo "$url" >> "$DOWNLOADS"; cp "$SERVE" "$out" ;;
   *) exit 22 ;;
 esac

@@ -1,0 +1,15 @@
+# Proposes each bump of the actions pinned by commit in .github/workflows/
+# as a pull request here (#53).
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+    ignore:
+      # Its v1 is a branch, and a tag also called v1 points at a 2021 commit,
+      # so a bump would move the pin backwards. Bumped by hand.
+      - dependency-name: Azure/static-web-apps-deploy

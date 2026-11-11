@@ -67,7 +67,7 @@ jobs:
     steps:
       # Depth 2 brings both parents of the merge commit a pull_request run
       # checks out, so the PR's changes are HEAD^1..HEAD with no further fetch.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 2
           persist-credentials: false
