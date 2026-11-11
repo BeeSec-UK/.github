@@ -41,7 +41,6 @@ cat > "$T/bin/curl" <<'EOF'
 out=
 while [ $# -gt 0 ]; do [ "$1" = -o ] && { out=$2; shift; }; url=$1; shift; done
 case "$url" in
-  *gitleaks.toml) echo '[allowlist]' > "$out" ;;
   *releases/download*) echo "$url" >> "$DOWNLOADS"; cp "$SERVE" "$out" ;;
   *) exit 22 ;;
 esac

@@ -860,8 +860,9 @@ jobs:
       #
       # Config is BeeSec-UK/.github/.gitleaks.toml, copied into each gitleaks
       # step so a pinned caller runs the config of its pinned commit (#53). The
-      # estate still tunes it in ONE place, this repository. It extends the upstream default ruleset and narrows only
-      # the entropy-based `generic-api-key` rule, in paths where a key-shaped
+      # estate still tunes it in ONE place, this repository. It extends the
+      # upstream default ruleset and narrows only the entropy-based
+      # `generic-api-key` rule, in paths where a key-shaped
       # string is expected: samples, fixtures, tests, vendored source, bicep
       # (listKeys/Key Vault references) and docs. High-confidence rules --
       # private keys, AWS, Azure AD client secrets, GitHub tokens -- are
