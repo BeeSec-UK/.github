@@ -297,8 +297,12 @@ on:
       security_checks:
         description: >-
           Run the security checks of docs/security-gate-plan.md as steps in
-          the gate, or in pick when the gate is skipped: today the
-          client-data scrub. Off by default while their cost is measured.
+          the gate: today the client-data scrub and the Python security
+          lint. When the gate is skipped, the scrub runs in pick instead and
+          the lint does not run, so Python outside both halves' paths, such
+          as scripts/*.py, is linted only when a later push runs the gate,
+          which lints every tracked file. Off by default while their cost is
+          measured.
         type: boolean
         default: false
 
@@ -1166,6 +1170,113 @@ jobs:
           else
             echo "client-data scrub: no private-shaped path and no client named, $(wc -l < "$list") pattern(s)"
           fi
+
+      # Python security lint, the Ruff half of check 3 in
+      # docs/security-gate-plan.md. On a PR it lints only the Python the PR
+      # changes, so existing debt never blocks one. Off unless
+      # security_checks, and shadow until security_enforce.
+      - name: Python security lint (Ruff)
+        id: ruff
+        if: inputs.security_checks
+        continue-on-error: ${{ !inputs.security_enforce }}
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          VER=0.17.0
+          # ruff-x86_64-unknown-linux-gnu.tar.gz from the 0.17.0 release's .sha256.
+          SHA256=c94fc1dc71f054d06d9f1149442dcb471516aa2b7d4b7e8124e05d082d4c91d3
+          git() { command git -c core.quotePath=false "$@"; }
+
+          # On a PR, the Python it adds or changes, so existing debt elsewhere never
+          # blocks it. Elsewhere, every tracked Python file. Installed packages, in
+          # a committed virtualenv's or Functions' lib/site-packages, and anything
+          # in node_modules are never linted. A directory merely named venv is.
+          if [ "$EVENT" = pull_request ]; then
+            case "${BASE:-}" in *[!0-9a-f]*|"") echo "::error::no usable PR base in the event"; exit 1 ;; esac
+            [ "${#BASE}" = 40 ] || { echo "::error::no usable PR base in the event"; exit 1; }
+            git fetch -q --no-tags --depth=1 origin "$BASE" || { echo "::error::could not fetch the PR base $BASE"; exit 1; }
+            mapfile -t files < <(git diff --name-only --no-renames --diff-filter=ACMR "$BASE" HEAD -- '*.py' | grep -viE '(^|/)(lib/(python[0-9.]+/)?site-packages|node_modules)/' || true)
+          else
+            mapfile -t files < <(git ls-files -- '*.py' | grep -viE '(^|/)(lib/(python[0-9.]+/)?site-packages|node_modules)/' || true)
+          fi
+          if [ "${#files[@]}" = 0 ]; then
+            echo "no Python to lint"
+            exit 0
+          fi
+
+          # A security suppression must say why, after its codes:
+          # `# noqa: S603 the argument list is fixed above`, and the same for a
+          # `# ruff: disable[S603]` range. A file-level `# ruff: noqa: S603` (or
+          # flake8) exempts the whole file, so it is refused outright, anywhere on
+          # a line, because Ruff honours one after a UTF-8 byte-order mark and a
+          # false match only fails closed. Ruff reads these in any case and
+          # spacing, so the match ignores both. A blanket
+          # `# noqa` or `# ruff: noqa` with no codes is PGH004's, below.
+          bad=0
+          refuse() {  # message, pattern
+            while IFS= read -r at; do
+              [ -n "$at" ] || continue
+              echo "::error file=${at%%:*},line=$(echo "$at" | cut -d: -f2)::$1: $at"
+              bad=$((bad + 1))
+            done < <(grep -inHE -- "$2" "${files[@]}" | cut -d: -f1,2 || true)
+          }
+          C='[A-Z]+[0-9]+'; SEP='[[:space:],]+'; SC='(^|[^A-Z0-9])S[0-9]+'
+          refuse "a '# noqa' on a security rule must give its reason after the code" \
+            "#[[:space:]]*noqa[[:space:]]*:[[:space:]]*($C$SEP)*S[0-9]+($SEP$C)*[[:space:],]*\$"
+          refuse "a '# ruff: disable[...]' of a security rule must give its reason after the bracket" \
+            "#[[:space:]]*ruff[[:space:]]*:[[:space:]]*disable[[:space:]]*\\[([^]]*[^A-Z0-9])?S[0-9]+[^]]*\\][[:space:]]*\$"
+          refuse "a file-level noqa may not exempt a security rule, so suppress it on its line with a reason" \
+            "#[[:space:]]*(ruff|flake8)[[:space:]]*:[[:space:]]*noqa[[:space:]]*:[^#]*$SC"
+
+          # The release archive is cached per runner, but the tool cache is shared by
+          # every job on a self-hosted runner, so nothing in it is run as found. Each
+          # run copies the archive into this job's RUNNER_TEMP, checks the copy
+          # against the pinned SHA-256 and unpacks ruff from it there. A cached
+          # archive that fails the check is fetched again.
+          CACHE_DIR="${RUNNER_TOOL_CACHE:-$RUNNER_TEMP}/ruff/${VER}"
+          WORK=$(mktemp -d "$RUNNER_TEMP/ruff.XXXXXX")
+          RUFF="$WORK/ruff"
+          checked() { echo "${SHA256}  $WORK/ruff.tgz" | sha256sum -c --quiet - >/dev/null 2>&1; }
+          cp "$CACHE_DIR/ruff.tgz" "$WORK/ruff.tgz" 2>/dev/null || true
+          if ! checked; then
+            mkdir -p "$CACHE_DIR"
+            ok=""
+            for attempt in 1 2 3 4; do
+              if curl -sSL --retry 3 --retry-all-errors -o "$WORK/ruff.tgz" \
+                   "https://github.com/astral-sh/ruff/releases/download/${VER}/ruff-x86_64-unknown-linux-gnu.tar.gz" \
+                 && checked; then
+                ok=1; break
+              fi
+              echo "ruff download attempt ${attempt} failed or did not match its checksum; retrying"
+              rm -f "$WORK/ruff.tgz"; sleep $((attempt * 5))
+            done
+            [ -n "$ok" ] || { echo "::error::could not fetch ruff ${VER} matching its pinned checksum"; exit 1; }
+            # Renamed into place, so another job never reads half an archive.
+            cp "$WORK/ruff.tgz" "$CACHE_DIR/ruff.tgz.$$" && mv -f "$CACHE_DIR/ruff.tgz.$$" "$CACHE_DIR/ruff.tgz" || true
+          fi
+          tar xzf "$WORK/ruff.tgz" -C "$WORK" --strip-components=1 ruff-x86_64-unknown-linux-gnu/ruff
+          "$RUFF" --version >/dev/null 2>&1 || { echo "::error::ruff ${VER} did not run"; exit 1; }
+
+          # The flake8-bandit rules, S, and PGH004, which refuses a blanket `# noqa`
+          # that would hide them. --isolated so the caller's own ruff config cannot
+          # switch them off. assert is how pytest tests are written, so S101 is
+          # allowed in tests only.
+          rc=0
+          "$RUFF" check --isolated --no-cache --select S,PGH004 \
+            --per-file-ignores='**/tests/**:S101' --per-file-ignores='**/test_*.py:S101' --per-file-ignores='**/conftest.py:S101' \
+            --output-format=github -- "${files[@]}" || rc=$?
+          case "$rc" in
+            0) ;;
+            1) bad=$((bad + 1)) ;;
+            *) echo "::error::ruff could not run (exit $rc)"; exit 1 ;;
+          esac
+          if [ "$bad" -gt 0 ]; then
+            echo "::error::Python security lint failed. Fix the finding, or suppress it on its line with '# noqa: S<code> <why>'."
+            exit 1
+          fi
+          echo "ruff: no security finding in ${#files[@]} file(s)"
 
       # Only when something is missing. A self-hosted runner keeps its
       # packages between runs, so on every run after the first this was an
