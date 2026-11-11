@@ -297,8 +297,12 @@ on:
       security_checks:
         description: >-
           Run the security checks of docs/security-gate-plan.md as steps in
-          the gate, or in pick when the gate is skipped: today the
-          client-data scrub. Off by default while their cost is measured.
+          the gate: today the client-data scrub and the dependency and
+          licence check. When the gate is skipped, the scrub runs in pick
+          instead and the dependency check does not run, because the gate is
+          skipped only when neither half changed or when the same tree
+          already passed it on its PR. Off by default while their cost is
+          measured.
         type: boolean
         default: false
 
@@ -1166,6 +1170,203 @@ jobs:
           else
             echo "client-data scrub: no private-shaped path and no client named, $(wc -l < "$list") pattern(s)"
           fi
+
+      # Dependencies and licences, check 2 of docs/security-gate-plan.md.
+      # OSV-Scanner reads every tracked lockfile against the OSV database
+      # and each package's licence against the allowlist below through
+      # deps.dev, so it needs no install and runs before one. A database it
+      # cannot reach fails the check (decision D). Off unless
+      # security_checks, and shadow until security_enforce.
+      - name: Dependencies and licences (OSV-Scanner)
+        id: osv
+        if: inputs.security_checks
+        continue-on-error: ${{ !inputs.security_enforce }}
+        run: |
+          set -euo pipefail
+          VER=2.7.0
+          # osv-scanner_linux_amd64 from the v2.7.0 release's osv-scanner_SHA256SUMS.
+          SHA256=160c6253e2922e9e0a6a9771c5c4c40a4b3c6090b34a3cdd5e80c96cc2e4218b
+          # Permissive licences plus MPL-2.0, whose file-level copyleft does not
+          # reach our own code. GPL, LGPL and AGPL fail, because these apps ship
+          # as a hosted service and the operator decides each case.
+          ALLOW='MIT,BSD-2-Clause,BSD-3-Clause,Apache-2.0,ISC,PSF-2.0,MPL-2.0,0BSD,Unlicense,CC0-1.0'
+
+          # Every ignore must say why and must run out. Checked before the scan, so
+          # a bad entry fails even when nothing it would hide is present.
+          #
+          # Nested configs: every tracked osv-scanner.toml is held to these rules.
+          # With a root osv-scanner.toml, that file is passed as --config and
+          # governs every lockfile, so osv-scanner does not read a nested one and
+          # the step names each one it is not reading. Without a root file,
+          # osv-scanner reads the osv-scanner.toml beside each lockfile.
+          mapfile -t configs < <(git ls-files -- 'osv-scanner.toml' '**/osv-scanner.toml')
+          if [ "${#configs[@]}" -gt 0 ]; then
+            # tomllib is Python 3.11 or newer. setup-python runs later and not on
+            # every gate, so this finds one on the runner or says plainly why not.
+            PY=""
+            for p in python3 python3.14 python3.13 python3.12 python3.11; do
+              if command -v "$p" >/dev/null 2>&1 && "$p" -I -c 'import tomllib' >/dev/null 2>&1; then PY=$p; break; fi
+            done
+            if [ -z "$PY" ]; then
+              echo "::error::the osv-scanner.toml check needs Python 3.11 or newer for tomllib, and this runner has none on PATH. Install one on the runner; the check fails rather than skip the ignore rules."
+              exit 1
+            fi
+            # -I: this runs in the caller's checkout, so without it a tracked
+            # tomllib.py or datetime.py would be imported in place of the real one.
+            "$PY" -I - "${configs[@]}" <<'PY'
+          import datetime, sys, tomllib
+          today = datetime.datetime.now(datetime.timezone.utc).date()
+          limit = today + datetime.timedelta(days=90)
+          bad = []
+
+          def as_date(v):
+              if isinstance(v, datetime.datetime):
+                  return v.date()
+              if isinstance(v, datetime.date):
+                  return v
+              if isinstance(v, str):
+                  try:
+                      return datetime.date.fromisoformat(v[:10])
+                  except ValueError:
+                      return None
+              return None
+
+          def expiry(what, value, key):
+              until = as_date(value)
+              if until is None:
+                  bad.append(f"{what} has no {key} date")
+              elif until > limit:
+                  bad.append(f"{what} runs to {until}, more than 90 days away (latest {limit})")
+
+          # osv-scanner decodes the config with BurntSushi/toml, which matches a key
+          # to its field in any case, so `[[ignoredvulns]]` or `IGNORE = true` is
+          # honoured. Every key is read here in the same way, and two keys that
+          # differ only in case are refused rather than guessed between.
+          def fold(v, where):
+              if isinstance(v, list):
+                  return [fold(x, where) for x in v]
+              if not isinstance(v, dict):
+                  return v
+              out = {}
+              for k, x in v.items():
+                  f = k.casefold()
+                  if f in out:
+                      bad.append(f"{where} has keys that differ only in case ({k})")
+                  out[f] = fold(x, where)
+              return out
+
+          def ignores(o):
+              # osv-scanner v2: ignore drops the package, vulnerability.ignore its
+              # advisories and license.ignore its licence check.
+              return any(t is True for t in (o.get("ignore"),
+                                              (o.get("vulnerability") or {}).get("ignore"),
+                                              (o.get("license") or {}).get("ignore")))
+
+          # The top-level keys osv-scanner 2.7.0 reads. Any other is refused, so a
+          # field a later release adds cannot get past these rules unread.
+          KNOWN = {"ignoredvulns", "packageoverrides", "goversionoverride"}
+
+          for path in sys.argv[1:]:
+              try:
+                  with open(path, "rb") as f:
+                      cfg = tomllib.load(f)
+              except (OSError, tomllib.TOMLDecodeError) as e:
+                  bad.append(f"{path}: cannot be read as TOML ({e})")
+                  continue
+              cfg = fold(cfg, path)
+              for k in sorted(set(cfg) - KNOWN):
+                  bad.append(f"{path}: {k} is not a key this check knows, so it is refused rather than left unread")
+              for i, v in enumerate(cfg.get("ignoredvulns", []), 1):
+                  what = f"{path}: IgnoredVulns {v.get('id', f'#{i}')}"
+                  if not str(v.get("reason", "")).strip():
+                      bad.append(f"{what} has no reason")
+                  expiry(what, v.get("ignoreuntil"), "ignoreUntil")
+              # An override with no name, or a name that is a pattern, covers a
+              # whole ecosystem, so each must name one package. One that ignores
+              # is an ignore and runs out within 90 days like the rest.
+              for i, o in enumerate(cfg.get("packageoverrides", []), 1):
+                  name = str(o.get("name", "")).strip()
+                  what = f"{path}: PackageOverrides {name or f'#{i}'}"
+                  if not str(o.get("reason", "")).strip():
+                      bad.append(f"{what} has no reason")
+                  if not name:
+                      bad.append(f"{what} names no package, so it would cover a whole ecosystem")
+                  if o.get("nameisregex") is True:
+                      bad.append(f"{what} uses nameIsRegex, so it could cover any package")
+                  if ignores(o):
+                      expiry(what, o.get("effectiveuntil"), "effectiveUntil")
+          for b in bad:
+              print(f"::error file={b.split(':', 1)[0]}::{b}")
+          sys.exit(1 if bad else 0)
+          PY
+            if [ -f osv-scanner.toml ]; then
+              for c in "${configs[@]}"; do
+                [ "$c" = osv-scanner.toml ] && continue
+                echo "::warning file=$c::$c is not read, because the root osv-scanner.toml governs every lockfile. Move its entries to the root file."
+              done
+            fi
+          fi
+
+          # Tracked lockfiles only, wherever they are, so node_modules and a local
+          # venv are never read.
+          mapfile -t locks < <(git ls-files -- 'requirements*.txt' '**/requirements*.txt' 'package-lock.json' '**/package-lock.json' \
+            'poetry.lock' '**/poetry.lock' 'uv.lock' '**/uv.lock' 'pnpm-lock.yaml' '**/pnpm-lock.yaml' 'yarn.lock' '**/yarn.lock' \
+            | grep -v -e '/node_modules/' -e '^node_modules/' || true)
+          if [ "${#locks[@]}" = 0 ]; then
+            echo "::notice::no tracked lockfile, so there are no dependencies to check"
+            exit 0
+          fi
+
+          # The binary is cached per runner like gitleaks. It is checked against the
+          # pinned SHA-256 on every use, cached or not, and anything that does not
+          # match is fetched again, so nothing unchecked is ever run.
+          OSV_DIR="${RUNNER_TOOL_CACHE:-$RUNNER_TEMP}/osv-scanner/${VER}"
+          OSV="$OSV_DIR/osv-scanner"
+          osv_ok() { echo "${SHA256}  $1" | sha256sum -c --quiet - >/dev/null 2>&1; }
+          if ! osv_ok "$OSV"; then
+            [ -e "$OSV" ] && echo "::warning::the cached osv-scanner ${VER} does not match its pinned checksum, so it is fetched again"
+            mkdir -p "$OSV_DIR"
+            dl=$(mktemp -p "$RUNNER_TEMP" osv-scanner.XXXXXX)
+            ok=""
+            for attempt in 1 2 3 4; do
+              if curl -sSL --retry 3 --retry-all-errors -o "$dl" \
+                   "https://github.com/google/osv-scanner/releases/download/v${VER}/osv-scanner_linux_amd64" \
+                 && osv_ok "$dl"; then
+                chmod +x "$dl" && mv -f "$dl" "$OSV.$$" && mv -f "$OSV.$$" "$OSV" && ok=1 && break
+              fi
+              echo "osv-scanner download attempt ${attempt} failed or did not match its checksum; retrying"
+              rm -f "$dl" "$OSV.$$"; sleep $((attempt * 5))
+            done
+            rm -f "$dl"
+            [ -n "$ok" ] && osv_ok "$OSV" || { echo "::error::could not fetch osv-scanner ${VER} matching its pinned checksum"; exit 1; }
+          fi
+
+          args=(scan source --licenses="$ALLOW" --format=table)
+          [ -f osv-scanner.toml ] && args+=(--config=osv-scanner.toml)
+          for l in "${locks[@]}"; do args+=(-L "$l"); done
+
+          # Exit 0 is clean, 1 a vulnerability or a licence outside the allowlist,
+          # 128 lockfiles with no packages in them. Anything else, an unreachable
+          # database above all, is tried once more and then fails (decision D). An
+          # extraction error in the log fails the same way whatever the exit code,
+          # 0 or 128 included, so the check never passes on a scan that did not
+          # happen. Exit 1 still fails as a finding.
+          log=$(mktemp -p "$RUNNER_TEMP" osv.XXXXXX.log)
+          for attempt in 1 2; do
+            rc=0
+            "$OSV" "${args[@]}" > "$log" 2>&1 || rc=$?
+            cat "$log"
+            if grep -q '^Error during extraction' "$log" && [ "$rc" != 1 ]; then
+              rc=127
+            fi
+            case "$rc" in
+              0|128) echo "osv-scanner: no known vulnerability and no licence outside the allowlist in ${#locks[@]} lockfile(s)"; exit 0 ;;
+              1) echo "::error::osv-scanner found a vulnerability or a licence outside the allowlist. Fix it, or add a reasoned entry to osv-scanner.toml that runs out within 90 days."; exit 1 ;;
+            esac
+            [ "$attempt" = 1 ] && { echo "osv-scanner could not complete (exit $rc); trying once more"; sleep 20; }
+          done
+          echo "::error::osv-scanner could not complete (exit $rc), most likely the vulnerability database was unreachable, and that fails the check"
+          exit 1
 
       # Only when something is missing. A self-hosted runner keeps its
       # packages between runs, so on every run after the first this was an
