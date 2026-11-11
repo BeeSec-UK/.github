@@ -253,7 +253,8 @@ policy "keys that differ only in case fail" 1 "[[IgnoredVulns]]
 id = \"GHSA-aaaa-bbbb-cccc\"
 ignoreUntil = $(ahead 30)
 reason = \"x\"
-REASON = \"\""
+REASON = \"y\""
+says "and names the clash" "differ only in case"
 policy "an unknown top-level key fails" 1 "[[IgnoredVuln]]
 id = \"GHSA-aaaa-bbbb-cccc\""
 policy "a reasoned lower-case ignore within 90 days passes" 0 "[[ignoredvulns]]
