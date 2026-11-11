@@ -4,6 +4,8 @@ Raised by: the .github chat for pkcrisp. Investigated by: the .github chat. Seve
 
 Decision: relayed by orchestrator-1 on 11 November 2026, in the operator's words, "pin it". That takes the lean on #53: pin by commit with a Dependabot bump, `beesec-app.yml` first, then `pr-sections.yml`. The operator's own review of this plan is what confirms it.
 
+Operator answers, relayed by orchestrator-1 on 11 November 2026 in their words: "hivemind, and yes Dependabot is fine". So the proving caller is hivemind, and Dependabot's update jobs are accepted.
+
 ## Root cause
 
 Every caller names the shared workflows by branch: `uses: BeeSec-UK/.github/.github/workflows/beesec-app.yml@main` in each app's `pipeline.yml`, and `pr-sections.yml@main` in each repository's `pr-sections.yml`. The starter template `workflow-templates/beesec-app.yml:33` writes `@main` too, so every new app starts the same way. A merge to `main` here therefore changes every caller's CI and deploys on its next run. Under `secrets: inherit` it runs with that caller's secrets, with no review in the caller and no record in its history. Nothing is enforced server-side on GitHub Free. The R3 comment on #53 has the candidates and the evidence.
@@ -40,7 +42,7 @@ The same check, as a script a caller can run, is what each app's chat uses to pr
 
 ## Proof on dev
 
-There is no dev deploy of `.github` itself. The proof is in one dev-only caller, chosen with the operator so that a push to its `main` deploys nothing to prod. Pin it to `v1.0.0`, tag a `v1.0.1` here, and show that:
+There is no dev deploy of `.github` itself. The proof is in hivemind, the operator's choice. Its `pipeline.yml:24` calls `beesec-app.yml@main`, and its only deploy is `dev` to `hivemind-dev` on `beesec-dev`, so a push to its `main` deploys nothing to prod. It already pins its factory actions as `@<sha> # app-stack-v1.13.0`, which is the form this plan uses. Pin it to `v1.0.0`, tag a `v1.0.1` here, and show that:
 
 1. Dependabot opens a bump PR in that caller, moving the SHA and the comment to `v1.0.1`.
 2. The caller's `pipeline.yml` runs on that PR on `beesec-dev` runners, and pick and gate pass at the new SHA.
@@ -50,7 +52,7 @@ There is no dev deploy of `.github` itself. The proof is in one dev-only caller,
 
 - **Fixes stop reaching callers by themselves.** A security fix here now needs a tag and a merged bump PR in every caller. Mitigation: the release notes mark a security release, and the orchestrator routes the bumps on the same day.
 - **Bump PRs run the caller's pipeline as Dependabot.** A Dependabot PR gets only Dependabot secrets, so a gate that needs a secret fails there. This is checked on the dev-only caller before any app adopts the pattern, and the fix there is Dependabot secrets for that caller, not a wider grant.
-- **Runner minutes.** Dependabot's own update job runs on GitHub's infrastructure. Whether that counts as a GitHub-hosted minute under the primary goal is checked against the billing page during the dev proof, before any app adopts the pattern.
+- **Runner minutes.** Dependabot's own update job runs on GitHub's infrastructure, not on the org's runners. The operator accepted that ("yes Dependabot is fine"), so it is not held against the primary goal. The caller's pipeline on a bump PR still runs on `beesec-dev`.
 - **Rollback.** A caller reverts to `@main` with a one-line change. Step 1 here only adds a tag, a template change and a test, and reverting it leaves callers untouched.
 
 ## Execution plan
