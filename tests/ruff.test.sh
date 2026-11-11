@@ -248,6 +248,11 @@ if [ -s "$REAL/ruff.tgz" ] && [ "$(sha256sum "$REAL/ruff.tgz" | cut -d' ' -f1)" 
   # Ruff reads a file-level noqa after a byte-order mark as exempting the file.
   mkrepo realfilebom; printf '\xef\xbb\xbf# ruff: noqa: S307\na = eval("1")\n' > "$R/api/new.py"; commit
   run "real ruff with a file-level security noqa after a byte-order mark fails" 1 pull_request "$BASE"
+  # A code after a second # is not read as exempted, so this one is not a
+  # file-level exemption of S307 and the eval is still caught.
+  mkrepo realfilehash; printf '# ruff: noqa: E501 # S307\na = eval("1")\n' > "$R/api/new.py"; commit
+  run "real ruff does not read a security code after a second # as exempted" 1 pull_request "$BASE"
+  says "and still finds the eval" "S307"
   mkrepo realfileblanket; printf '# ruff: noqa\na = eval("1")\n' > "$R/api/new.py"; commit
   run "real ruff fails a blanket file-level ruff noqa" 1 pull_request "$BASE"
   says "through PGH004" "PGH004"
